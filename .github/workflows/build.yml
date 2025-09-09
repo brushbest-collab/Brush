@@ -1,0 +1,79 @@
+name: Build Desktop App
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    env:
+      # 避免簽章詢問造成中斷
+      CSC_IDENTITY_AUTO_DISCOVERY: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ---- Node ----
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Node deps
+        run: npm ci
+
+      # ---- Python ----
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Prepare venv & install Python deps
+        shell: pwsh
+        run: |
+          python -m venv python/venv
+          python/python -c "import sys" 2>$null | Out-Null
+          python/venv/Scripts/python -m pip install --upgrade pip
+          if (Test-Path 'python/requirements.txt') {
+            python/venv/Scripts/pip install -r python/requirements.txt
+          }
+          # 需要 huggingface_hub 來下載模型
+          python/venv/Scripts/pip install huggingface_hub
+
+      - name: Download SDXL-Turbo model into repo
+        shell: pwsh
+        run: >
+          python/venv/Scripts/python -c
+          "from huggingface_hub import snapshot_download;
+          from pathlib import Path;
+          target=Path('python/models/sd-turbo');
+          target.mkdir(parents=True, exist_ok=True);
+          snapshot_download(repo_id='stabilityai/sdxl-turbo',
+                            local_dir=str(target),
+                            local_dir_use_symlinks=False);
+          print('Model downloaded to:', target)"
+
+      # ---- Build ----
+      - name: Build Windows installer
+        run: npx electron-builder --win
+        # 若你在 package.json 有自訂 script，可改成：npm run build:win
+
+      # ---- Artifacts ----
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows
+          path: |
+            dist/*.exe
+            dist/*.msi
+            dist/*.zip
+            dist/*.7z
+          if-no-files-found: error
