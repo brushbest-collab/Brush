@@ -1,4 +1,4 @@
-name: Build Desktop App
+name: Build Desktop App (diagnostic)
 
 on:
   workflow_dispatch:
@@ -21,11 +21,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show workspace (tree)
+      - name: Prepare logs folder
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path logs | Out-Null
+
+      - name: Show workspace tree
         shell: pwsh
         run: |
-          Write-Host "CWD =" (Get-Location)
-          Get-ChildItem -Recurse -Force | Select-Object FullName | Format-Table -AutoSize
+          (Get-Location).Path | Tee-Object -FilePath logs/00-cwd.txt
+          Get-ChildItem -Recurse -Force | Select-Object FullName, Length |
+            Format-Table -AutoSize | Out-String | Tee-Object -FilePath logs/01-tree.txt
 
       # ---------- Node ----------
       - name: Setup Node (with npm cache if lockfile exists)
@@ -46,32 +51,34 @@ jobs:
 
       - name: Print Node/NPM versions
         run: |
-          node -v
-          npm -v
+          node -v | Tee-Object -FilePath logs/02-node.txt
+          npm -v  | Tee-Object -FilePath logs/03-npm.txt -Append
 
-      - name: Ensure package.json exists
+      - name: Ensure package.json exists and has build field
         shell: pwsh
         run: |
-          if (-not (Test-Path "package.json")) {
-            Write-Error "package.json not found at repo root. Please commit it."
+          if (-not (Test-Path "package.json")) { throw "package.json not found at repo root" }
+          Get-Content package.json | Tee-Object -FilePath logs/04-package.json.txt
+          $pkg = Get-Content package.json | ConvertFrom-Json
+          if (-not $pkg.build) {
+            Write-Warning "No 'build' field in package.json. electron-builder may fail."
           }
-          Get-Content package.json
 
-      - name: Install Node deps (lockfile-aware, verbose)
+      - name: Install Node deps (lockfile-aware, verbose -> log file)
         shell: pwsh
         run: |
           if (Test-Path "package-lock.json") {
-            Write-Host "Found package-lock.json → npm ci (verbose)"
-            npm ci --loglevel verbose
+            Write-Host "Found package-lock.json → npm ci"
+            npm ci --loglevel verbose *>&1 | Tee-Object -FilePath logs/05-npm-install.log
           } else {
-            Write-Host "No lockfile → npm install (legacy peer ok, verbose)"
-            npm install --legacy-peer-deps --loglevel verbose
+            Write-Host "No lockfile → npm install"
+            npm install --legacy-peer-deps --loglevel verbose *>&1 | Tee-Object -FilePath logs/05-npm-install.log
           }
 
-      - name: Ensure electron-builder is available
+      - name: Ensure electron-builder available
         shell: pwsh
         run: |
-          npx --yes electron-builder --version
+          npx --yes electron-builder --version *>&1 | Tee-Object -FilePath logs/06-electron-builder-version.txt
 
       # ---------- Python ----------
       - name: Setup Python
@@ -84,11 +91,11 @@ jobs:
         shell: pwsh
         run: |
           python -m venv python/venv
-          python/venv/Scripts/python -m pip install --upgrade pip
+          python/venv/Scripts/python -m pip install --upgrade pip *>&1 | Tee-Object -FilePath logs/07-pip-upgrade.log
           if (Test-Path 'python/requirements.txt') {
-            python/venv/Scripts/pip install -r python/requirements.txt
+            python/venv/Scripts/pip install -r python/requirements.txt *>&1 | Tee-Object -FilePath logs/08-pip-req.log
           }
-          python/venv/Scripts/pip install huggingface_hub
+          python/venv/Scripts/pip install huggingface_hub *>&1 | Tee-Object -FilePath logs/09-pip-hf.log
 
       - name: Download SDXL-Turbo model
         shell: pwsh
@@ -96,20 +103,28 @@ jobs:
           python/venv/Scripts/python -c
           "from huggingface_hub import snapshot_download;
           from pathlib import Path;
-          target=Path('python/models/sd-turbo');
-          target.mkdir(parents=True, exist_ok=True);
-          snapshot_download(repo_id='stabilityai/sdxl-turbo',
-                            local_dir=str(target),
-                            local_dir_use_symlinks=False);
-          print('Model downloaded to:', target)"
+          target=Path('python/models/sd-turbo'); target.mkdir(parents=True, exist_ok=True);
+          snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False);
+          print('Model downloaded to:', target)" *>&1 | Tee-Object -FilePath logs/10-model-download.log
 
       # ---------- Build ----------
-      - name: Build Windows installer (verbose)
-        run: npx electron-builder --win --publish never --x64 --ia32 --config.asar=true --config.generateUpdatesFilesForAllChannels=false
-        # 若你有 script： npm run build:win
+      - name: Build Windows installer (verbose -> log file)
+        run: >
+          npx electron-builder --win --publish never --x64
+          --config.asar=true --config.generateUpdatesFilesForAllChannels=false
+          *>&1 | tee logs/11-electron-builder.log
 
-      # ---------- Artifacts ----------
-      - name: Upload artifact
+      # ---------- Upload logs & artifacts ----------
+      - name: Upload CI logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: logs/**
+          if-no-files-found: warn
+
+      - name: Upload installer (if any)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: installer-windows
@@ -118,4 +133,4 @@ jobs:
             dist/*.msi
             dist/*.zip
             dist/*.7z
-          if-no-files-found: error
+          if-no-files-found: warn
