@@ -12,9 +12,7 @@ jobs:
   build-windows:
     runs-on: windows-latest
     env:
-      # 避免 electron-builder 嘗試找簽章造成卡住
       CSC_IDENTITY_AUTO_DISCOVERY: false
-      # 若需下載私有模型：在 Repo → Settings → Secrets 建立 HF_TOKEN，並啟用下一行
       # HUGGINGFACEHUB_API_TOKEN: ${{ secrets.HF_TOKEN }}
 
     steps:
@@ -27,12 +25,22 @@ jobs:
           Write-Host "Workspace:" (Get-Location)
           Get-ChildItem -Force
 
-      # ---- Node ----
-      - name: Setup Node
+      # ---------- Node (with/without cache depending on lockfile) ----------
+      - name: Setup Node (with npm cache)
+        if: ${{ hashFiles('package-lock.json') != '' || hashFiles('**/package-lock.json') != '' }}
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            **/package-lock.json
+
+      - name: Setup Node (no cache)
+        if: ${{ hashFiles('package-lock.json') == '' && hashFiles('**/package-lock.json') == '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
       - name: Install Node deps (lockfile-aware)
         shell: pwsh
@@ -45,7 +53,7 @@ jobs:
             npm install --no-audit --fund=false
           }
 
-      # ---- Python ----
+      # ---------- Python ----------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -75,12 +83,12 @@ jobs:
                             local_dir_use_symlinks=False);
           print('Model downloaded to:', target)"
 
-      # ---- Build Electron (outputs to dist/) ----
+      # ---------- Build ----------
       - name: Build Windows installer
         run: npx electron-builder --win
-        # 或改為：npm run build:win（若你在 package.json 有對應 script）
+        # 或：npm run build:win
 
-      # ---- Upload artifacts ----
+      # ---------- Artifacts ----------
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
