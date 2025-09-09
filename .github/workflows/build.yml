@@ -13,20 +13,22 @@ jobs:
     runs-on: windows-latest
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: false
+      NPM_CONFIG_FUND: false
+      NPM_CONFIG_AUDIT: false
       # HUGGINGFACEHUB_API_TOKEN: ${{ secrets.HF_TOKEN }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show workspace (debug)
+      - name: Show workspace (tree)
         shell: pwsh
         run: |
-          Write-Host "Workspace:" (Get-Location)
-          Get-ChildItem -Force
+          Write-Host "CWD =" (Get-Location)
+          Get-ChildItem -Recurse -Force | Select-Object FullName | Format-Table -AutoSize
 
-      # ---------- Node (with/without cache depending on lockfile) ----------
-      - name: Setup Node (with npm cache)
+      # ---------- Node ----------
+      - name: Setup Node (with npm cache if lockfile exists)
         if: ${{ hashFiles('package-lock.json') != '' || hashFiles('**/package-lock.json') != '' }}
         uses: actions/setup-node@v4
         with:
@@ -42,16 +44,34 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Node deps (lockfile-aware)
+      - name: Print Node/NPM versions
+        run: |
+          node -v
+          npm -v
+
+      - name: Ensure package.json exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "package.json")) {
+            Write-Error "package.json not found at repo root. Please commit it."
+          }
+          Get-Content package.json
+
+      - name: Install Node deps (lockfile-aware, verbose)
         shell: pwsh
         run: |
           if (Test-Path "package-lock.json") {
-            Write-Host "Found package-lock.json → npm ci"
-            npm ci
+            Write-Host "Found package-lock.json → npm ci (verbose)"
+            npm ci --loglevel verbose
           } else {
-            Write-Host "No lockfile → npm install"
-            npm install --no-audit --fund=false
+            Write-Host "No lockfile → npm install (legacy peer ok, verbose)"
+            npm install --legacy-peer-deps --loglevel verbose
           }
+
+      - name: Ensure electron-builder is available
+        shell: pwsh
+        run: |
+          npx --yes electron-builder --version
 
       # ---------- Python ----------
       - name: Setup Python
@@ -70,7 +90,7 @@ jobs:
           }
           python/venv/Scripts/pip install huggingface_hub
 
-      - name: Download SDXL-Turbo model (relative paths only)
+      - name: Download SDXL-Turbo model
         shell: pwsh
         run: >
           python/venv/Scripts/python -c
@@ -84,9 +104,9 @@ jobs:
           print('Model downloaded to:', target)"
 
       # ---------- Build ----------
-      - name: Build Windows installer
-        run: npx electron-builder --win
-        # 或：npm run build:win
+      - name: Build Windows installer (verbose)
+        run: npx electron-builder --win --publish never --x64 --ia32 --config.asar=true --config.generateUpdatesFilesForAllChannels=false
+        # 若你有 script： npm run build:win
 
       # ---------- Artifacts ----------
       - name: Upload artifact
