@@ -72,7 +72,7 @@ jobs:
           if (-not (Test-Path "package.json")) { throw "package.json not found in APP_DIR ($env:APP_DIR)" }
           Get-Content package.json | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/04-package.before.txt
 
-      # —— 修補 package.json：固定 EXE/捷徑命名 + 模型移出 asar + icon 路徑 —— 
+      # —— 修補 package.json：固定命名 + 模型移出 asar + 正確 icon 路徑（**移除 win.shortcutName**）——
       - name: Patch package.json (exe/shortcuts & model outside asar)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
@@ -101,28 +101,22 @@ jobs:
           # 不把 venv/模型塞進 asar
           $b.files = @("**/*","!python/venv/**","!python/models/**","!logs/**","!.github/**","!**/*.log","!**/*.md")
           $b.extraResources = @(@{ from="python/models"; to="resources/python/models"; filter=@("**/*") })
+          if (-not ($b.PSObject.Properties.Name -contains 'asar')) { $b | Add-Member -NotePropertyName 'asar' -NotePropertyValue $true } else { $b.asar = $true }
+          if (-not ($b.PSObject.Properties.Name -contains 'asarUnpack')) { $b | Add-Member -NotePropertyName 'asarUnpack' -NotePropertyValue @("python/**") } else { $b.asarUnpack = @("python/**") }
 
-          if (-not ($b.PSObject.Properties.Name -contains 'asar')) {
-            $b | Add-Member -NotePropertyName 'asar' -NotePropertyValue $true
-          } else { $b.asar = $true }
-
-          if (-not ($b.PSObject.Properties.Name -contains 'asarUnpack')) {
-            $b | Add-Member -NotePropertyName 'asarUnpack' -NotePropertyValue @("python/**")
-          } else { $b.asarUnpack = @("python/**") }
-
-          # Windows/NSIS + icon + 捷徑
+          # Windows/NSIS + icon（icon 將在下一步 copy 進 APP_DIR/build）
           Ensure-Prop $b 'win' (@{})
-          $b.win.icon = "build/icon.ico"     # ← 會在下一步把 icon 複製到 APP_DIR/build
+          $b.win.icon = "build/icon.ico"
           $b.win.target = @("nsis")
-          $b.win.shortcutName = "EVI Brush Desktop"
+          if ($b.win.PSObject.Properties.Name -contains 'shortcutName') { $b.win.PSObject.Properties.Remove('shortcutName') }  # ← 移除不支援的鍵
 
           Ensure-Prop $b 'nsis' (@{})
           $b.nsis.oneClick = $true
           $b.nsis.perMachine = $false
           $b.nsis.allowToChangeInstallationDirectory = $false
-          $b.nsis.createDesktopShortcut = $true   # 布林 true，避免 'Always' 驗證問題
+          $b.nsis.createDesktopShortcut = $true
           $b.nsis.createStartMenuShortcut = $true
-          $b.nsis.shortcutName = "EVI Brush Desktop"
+          $b.nsis.shortcutName = "EVI Brush Desktop"   # ← 正確位置
           $b.nsis.runAfterFinish = $true
           $b.nsis.uninstallDisplayName = "EVI Brush Desktop"
 
@@ -194,7 +188,7 @@ jobs:
           snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False);
           print('Model downloaded to:', target)" *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/10-model-download.log
 
-      # 4) Icon：將根目錄的 build/icon.ico 複製到 APP_DIR/build，讓 electron-builder 能找到
+      # 4) Icon：將根目錄 build/icon.ico 複製到 APP_DIR/build，讓 electron-builder 能找到
       - name: Put icon under APP_DIR/build (required by electron-builder)
         shell: pwsh
         run: |
