@@ -1,4 +1,4 @@
-name: Build Desktop App (diagnostic)
+name: Build Desktop App (auto-detect app dir)
 
 on:
   workflow_dispatch:
@@ -25,26 +25,29 @@ jobs:
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path logs | Out-Null
 
+      # === 1) 自動尋找含有 package.json 的專案資料夾 ===
+      - name: Locate app directory (where package.json lives)
+        id: locate
+        shell: pwsh
+        run: |
+          $pkg = Get-ChildItem -Path . -Filter package.json -Recurse -File -Depth 6 `
+                 | Where-Object { $_.FullName -notmatch '\\node_modules\\' } `
+                 | Select-Object -First 1
+          if (-not $pkg) { throw "package.json not found anywhere in the repo." }
+          $dir = $pkg.DirectoryName
+          "APP_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "APP_DIR = $dir"
+
       - name: Show workspace tree
         shell: pwsh
         run: |
-          (Get-Location).Path | Tee-Object -FilePath logs/00-cwd.txt
+          "CWD = $(Get-Location)" | Tee-Object -FilePath logs/00-cwd.txt
           Get-ChildItem -Recurse -Force | Select-Object FullName, Length |
             Format-Table -AutoSize | Out-String | Tee-Object -FilePath logs/01-tree.txt
+          "APP_DIR = $env:APP_DIR" | Tee-Object -FilePath logs/01a-appdir.txt
 
-      # ---------- Node ----------
-      - name: Setup Node (with npm cache if lockfile exists)
-        if: ${{ hashFiles('package-lock.json') != '' || hashFiles('**/package-lock.json') != '' }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            **/package-lock.json
-
-      - name: Setup Node (no cache)
-        if: ${{ hashFiles('package-lock.json') == '' && hashFiles('**/package-lock.json') == '' }}
+      # === 2) Node ===
+      - name: Setup Node (no cache to avoid lockfile issues)
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -54,33 +57,32 @@ jobs:
           node -v | Tee-Object -FilePath logs/02-node.txt
           npm -v  | Tee-Object -FilePath logs/03-npm.txt -Append
 
-      - name: Ensure package.json exists and has build field
+      - name: Ensure package.json exists in APP_DIR
         shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
         run: |
-          if (-not (Test-Path "package.json")) { throw "package.json not found at repo root" }
-          Get-Content package.json | Tee-Object -FilePath logs/04-package.json.txt
-          $pkg = Get-Content package.json | ConvertFrom-Json
-          if (-not $pkg.build) {
-            Write-Warning "No 'build' field in package.json. electron-builder may fail."
-          }
+          if (-not (Test-Path "package.json")) { throw "package.json not found in APP_DIR ($env:APP_DIR)" }
+          Get-Content package.json | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/04-package.json.txt
 
-      - name: Install Node deps (lockfile-aware, verbose -> log file)
+      - name: Install Node deps (lockfile-aware, verbose)
         shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
         run: |
           if (Test-Path "package-lock.json") {
             Write-Host "Found package-lock.json → npm ci"
-            npm ci --loglevel verbose *>&1 | Tee-Object -FilePath logs/05-npm-install.log
+            npm ci --loglevel verbose *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/05-npm-install.log
           } else {
             Write-Host "No lockfile → npm install"
-            npm install --legacy-peer-deps --loglevel verbose *>&1 | Tee-Object -FilePath logs/05-npm-install.log
+            npm install --legacy-peer-deps --loglevel verbose *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/05-npm-install.log
           }
 
       - name: Ensure electron-builder available
         shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
         run: |
-          npx --yes electron-builder --version *>&1 | Tee-Object -FilePath logs/06-electron-builder-version.txt
+          npx --yes electron-builder --version *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/06-electron-builder-version.txt
 
-      # ---------- Python ----------
+      # === 3) Python (在 APP_DIR 內建立 venv 與模型資料夾) ===
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -89,32 +91,35 @@ jobs:
 
       - name: Prepare venv & install Python deps
         shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
         run: |
           python -m venv python/venv
-          python/venv/Scripts/python -m pip install --upgrade pip *>&1 | Tee-Object -FilePath logs/07-pip-upgrade.log
+          python/venv/Scripts/python -m pip install --upgrade pip *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/07-pip-upgrade.log
           if (Test-Path 'python/requirements.txt') {
-            python/venv/Scripts/pip install -r python/requirements.txt *>&1 | Tee-Object -FilePath logs/08-pip-req.log
+            python/venv/Scripts/pip install -r python/requirements.txt *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/08-pip-req.log
           }
-          python/venv/Scripts/pip install huggingface_hub *>&1 | Tee-Object -FilePath logs/09-pip-hf.log
+          python/venv/Scripts/pip install huggingface_hub *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/09-pip-hf.log
 
       - name: Download SDXL-Turbo model
         shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
         run: >
           python/venv/Scripts/python -c
           "from huggingface_hub import snapshot_download;
           from pathlib import Path;
           target=Path('python/models/sd-turbo'); target.mkdir(parents=True, exist_ok=True);
           snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False);
-          print('Model downloaded to:', target)" *>&1 | Tee-Object -FilePath logs/10-model-download.log
+          print('Model downloaded to:', target)" *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/10-model-download.log
 
-      # ---------- Build ----------
-      - name: Build Windows installer (verbose -> log file)
+      # === 4) Build ===
+      - name: Build Windows installer (verbose)
+        working-directory: ${{ env.APP_DIR }}
         run: >
           npx electron-builder --win --publish never --x64
           --config.asar=true --config.generateUpdatesFilesForAllChannels=false
-          *>&1 | tee logs/11-electron-builder.log
+          *>&1 | tee $env:GITHUB_WORKSPACE/logs/11-electron-builder.log
 
-      # ---------- Upload logs & artifacts ----------
+      # === 5) Upload logs & artifacts ===
       - name: Upload CI logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -129,8 +134,8 @@ jobs:
         with:
           name: installer-windows
           path: |
-            dist/*.exe
-            dist/*.msi
-            dist/*.zip
-            dist/*.7z
+            ${{ env.APP_DIR }}/dist/*.exe
+            ${{ env.APP_DIR }}/dist/*.msi
+            ${{ env.APP_DIR }}/dist/*.zip
+            ${{ env.APP_DIR }}/dist/*.7z
           if-no-files-found: warn
