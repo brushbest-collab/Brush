@@ -33,7 +33,6 @@ jobs:
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path logs | Out-Null
 
-      # 找出含 package.json 的應用資料夾
       - name: Locate app directory (where package.json lives)
         id: locate
         shell: pwsh
@@ -53,7 +52,6 @@ jobs:
             Format-Table -AutoSize | Out-String | Tee-Object -FilePath logs/01-tree.txt
           "APP_DIR = $env:APP_DIR" | Tee-Object -FilePath logs/01a-appdir.txt
 
-      # Node
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -71,37 +69,33 @@ jobs:
           if (-not (Test-Path "package.json")) { throw "package.json not found in APP_DIR ($env:APP_DIR)" }
           Get-Content package.json | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/04-package.before.txt
 
-      # ★ 直接覆蓋整個 build 區塊為乾淨的最小可用設定（避免舊鍵殘留）
+      # 直接覆蓋成「最小、合規」的 build 設定
       - name: Overwrite package.json build config (clean minimal config)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
           $pkg = Get-Content package.json -Raw | ConvertFrom-Json
-
           $pkg.build = @{
-            appId            = "com.evi.brush.desktop";
-            productName      = "EVI Brush Desktop";
-            executableName   = "evi-brush-desktop";
-            productFilename  = "evi-brush-desktop";
-            directories      = @{ output = "dist" };
-            files            = @("**/*","!python/venv/**","!python/models/**","!logs/**","!.github/**","!**/*.log","!**/*.md");
-            extraResources   = @(@{ from="python/models"; to="resources/python/models"; filter=@("**/*") });
-            asar             = $true;
-            asarUnpack       = @("python/**");
-            win              = @{ icon="build/icon.ico"; target=@("nsis") };
-            nsis             = @{
+            appId           = "com.evi.brush.desktop";
+            productName     = "EVI Brush Desktop";
+            directories     = @{ output = "dist" };
+            files           = @("**/*","!python/venv/**","!python/models/**","!logs/**","!.github/**","!**/*.log","!**/*.md");
+            extraResources  = @(@{ from="python/models"; to="resources/python/models"; filter=@("**/*") });
+            asar            = $true;
+            asarUnpack      = @("python/**");
+            win             = @{ icon="build/icon.ico"; target=@("nsis") };
+            nsis            = @{
               oneClick                         = $true;
               perMachine                       = $false;
               allowToChangeInstallationDirectory= $false;
-              createDesktopShortcut            = "always";   # 明確用字串，避免版本差異
+              createDesktopShortcut            = $true;
               createStartMenuShortcut          = $true;
               shortcutName                     = "EVI Brush Desktop";
               runAfterFinish                   = $true;
               uninstallDisplayName             = "EVI Brush Desktop";
             };
-            publish          = @(@{ provider = "github" });
+            publish         = @(@{ provider = "github" });
           }
-
           ($pkg | ConvertTo-Json -Depth 100) | Set-Content package.json -Encoding UTF8
           Get-Content package.json | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/04-package.after.txt | Out-Null
 
@@ -120,7 +114,6 @@ jobs:
         working-directory: ${{ env.APP_DIR }}
         run: npx --yes electron-builder --version *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/06-electron-builder-version.txt
 
-      # Python（venv + 依賴）
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -138,7 +131,6 @@ jobs:
           }
           python/venv/Scripts/pip install huggingface_hub *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/09-pip-hf.log
 
-      # 是否打包模型（手動觸發時才下載）
       - name: Decide include model
         id: model
         shell: pwsh
@@ -167,7 +159,6 @@ jobs:
           snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False);
           print('Model downloaded to:', target)" *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/10-model-download.log
 
-      # Icon：將根目錄 build/icon.ico 複製到 APP_DIR/build
       - name: Put icon under APP_DIR/build (required by electron-builder)
         shell: pwsh
         run: |
@@ -182,7 +173,6 @@ jobs:
             Write-Warning "Root build/icon.ico not found – builder may fallback to default icon."
           }
 
-      # Build
       - name: Build Windows installer (verbose)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
@@ -190,7 +180,6 @@ jobs:
           $env:DEBUG = "electron-builder"
           npx electron-builder --win --publish never --x64 *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/11-electron-builder.log
 
-      # 上傳日誌與產物
       - name: Upload CI logs
         if: always()
         uses: actions/upload-artifact@v4
