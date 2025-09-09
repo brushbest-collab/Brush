@@ -1,40 +1,68 @@
 {
   "name": "evi-brush-desktop",
-  "version": "0.4.0",
-  "description": "Sport Sneaker \u2014 Multi-View Composite by EVI Brush (Actions Ready)",
+  "version": "0.5.0",
+  "description": "EVI Brush Desktop",
   "main": "main.js",
-  "author": "EVI Brush",
+  "author": "",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder",
-    "pack": "electron-builder --dir"
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder --win --x64",
+    "release": "electron-builder --win --x64 --publish always",
+    "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
-    "electron-store": "^8.1.0"
+    "electron": "^30.5.1",
+    "electron-updater": "^6.3.9"
   },
   "devDependencies": {
-    "electron": "^30.0.0",
     "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "com.evi.brush",
+    "appId": "com.evi.brush.desktop",
+    "productName": "EVI Brush Desktop",
+    "executableName": "evi-brush-desktop",
+    "productFilename": "evi-brush-desktop",
+    "directories": {
+      "output": "dist"
+    },
+
     "files": [
-      "main.js",
-      "preload.js",
-      "python/**/*",
-      "scripts/**/*",
-      "README.md",
-      "package.json"
+      "**/*",
+      "!python/venv/**",
+      "!python/models/**",
+      "!logs/**",
+      "!.github/**",
+      "!**/*.log",
+      "!**/*.md"
     ],
+
     "extraResources": [
-      {
-        "from": "python",
-        "to": "python"
-      }
+      { "from": "python/models", "to": "resources/python/models", "filter": ["**/*"] }
     ],
-    "asarUnpack": [
-      "python/**"
+
+    "asar": true,
+    "asarUnpack": ["python/**"],
+
+    "win": {
+      "icon": "build/icon.ico",
+      "target": ["nsis"],
+      "shortcutName": "EVI Brush Desktop"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "EVI Brush Desktop",
+      "runAfterFinish": true,
+      "uninstallDisplayName": "EVI Brush Desktop"
+    },
+
+    "publish": [
+      { "provider": "github" }
     ]
   }
 }
