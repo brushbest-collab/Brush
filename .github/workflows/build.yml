@@ -12,8 +12,10 @@ jobs:
   build-windows:
     runs-on: windows-latest
     env:
-      # 避免簽章詢問造成中斷
+      # 避免 electron-builder 嘗試找簽章導致卡住
       CSC_IDENTITY_AUTO_DISCOVERY: false
+      # 如需下載私有模型，打開下一行並在 Repo → Settings → Secrets 設定 HF_TOKEN
+      # HUGGINGFACEHUB_API_TOKEN: ${{ secrets.HF_TOKEN }}
 
     steps:
       - name: Checkout
@@ -26,8 +28,16 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Install Node deps
-        run: npm ci
+      - name: Install Node deps (lockfile-aware)
+        shell: pwsh
+        run: |
+          if (Test-Path "package-lock.json") {
+            Write-Host "Found package-lock.json → npm ci"
+            npm ci
+          } else {
+            Write-Host "No lockfile → npm install"
+            npm install --no-audit --fund=false
+          }
 
       # ---- Python ----
       - name: Setup Python
@@ -40,7 +50,6 @@ jobs:
         shell: pwsh
         run: |
           python -m venv python/venv
-          python/python -c "import sys" 2>$null | Out-Null
           python/venv/Scripts/python -m pip install --upgrade pip
           if (Test-Path 'python/requirements.txt') {
             python/venv/Scripts/pip install -r python/requirements.txt
@@ -48,7 +57,7 @@ jobs:
           # 需要 huggingface_hub 來下載模型
           python/venv/Scripts/pip install huggingface_hub
 
-      - name: Download SDXL-Turbo model into repo
+      - name: Download SDXL-Turbo model
         shell: pwsh
         run: >
           python/venv/Scripts/python -c
@@ -64,7 +73,7 @@ jobs:
       # ---- Build ----
       - name: Build Windows installer
         run: npx electron-builder --win
-        # 若你在 package.json 有自訂 script，可改成：npm run build:win
+        # 若你有自訂 script，也可用：npm run build:win
 
       # ---- Artifacts ----
       - name: Upload artifact
