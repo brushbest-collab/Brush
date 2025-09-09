@@ -101,12 +101,18 @@ jobs:
           # 不把 venv/模型塞進 asar
           $b.files = @("**/*","!python/venv/**","!python/models/**","!logs/**","!.github/**","!**/*.log","!**/*.md")
           $b.extraResources = @(@{ from="python/models"; to="resources/python/models"; filter=@("**/*") })
-          if (-not ($b.PSObject.Properties.Name -contains 'asar')) { $b | Add-Member -NotePropertyName 'asar' -NotePropertyValue $true } else { $b.asar = $true }
-          if (-not ($b.PSObject.Properties.Name -contains 'asarUnpack')) { $b | Add-Member -NotePropertyName 'asarUnpack' -NotePropertyValue @("python/**") } else { $b.asarUnpack = @("python/**") }
 
-          # Windows/NSIS + icon + 捷徑（icon 在 repo 根目錄的 build/）
+          if (-not ($b.PSObject.Properties.Name -contains 'asar')) {
+            $b | Add-Member -NotePropertyName 'asar' -NotePropertyValue $true
+          } else { $b.asar = $true }
+
+          if (-not ($b.PSObject.Properties.Name -contains 'asarUnpack')) {
+            $b | Add-Member -NotePropertyName 'asarUnpack' -NotePropertyValue @("python/**")
+          } else { $b.asarUnpack = @("python/**") }
+
+          # Windows/NSIS + icon + 捷徑
           Ensure-Prop $b 'win' (@{})
-          $b.win.icon = "../build/icon.ico"      # ← 重點：從 APP_DIR 回到根目錄
+          $b.win.icon = "build/icon.ico"     # ← 會在下一步把 icon 複製到 APP_DIR/build
           $b.win.target = @("nsis")
           $b.win.shortcutName = "EVI Brush Desktop"
 
@@ -114,7 +120,7 @@ jobs:
           $b.nsis.oneClick = $true
           $b.nsis.perMachine = $false
           $b.nsis.allowToChangeInstallationDirectory = $false
-          $b.nsis.createDesktopShortcut = $true   # ← 改成布林，避免 'Always' 造成驗證失敗
+          $b.nsis.createDesktopShortcut = $true   # 布林 true，避免 'Always' 驗證問題
           $b.nsis.createStartMenuShortcut = $true
           $b.nsis.shortcutName = "EVI Brush Desktop"
           $b.nsis.runAfterFinish = $true
@@ -159,7 +165,7 @@ jobs:
           }
           python/venv/Scripts/pip install huggingface_hub *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/09-pip-hf.log
 
-      # 是否打包模型（手動觸發時才下載）
+      # 3.5) 是否打包模型（手動觸發時才下載）
       - name: Decide include model
         id: model
         shell: pwsh
@@ -188,16 +194,22 @@ jobs:
           snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False);
           print('Model downloaded to:', target)" *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/10-model-download.log
 
-      # Icon 檢查（非阻斷）
-      - name: Ensure icon exists (non-blocking)
+      # 4) Icon：將根目錄的 build/icon.ico 複製到 APP_DIR/build，讓 electron-builder 能找到
+      - name: Put icon under APP_DIR/build (required by electron-builder)
         shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
         run: |
-          if (-not (Test-Path "../build/icon.ico")) {
-            Write-Warning "icon not found at ../build/icon.ico – electron-builder will use default icon."
+          $src = Join-Path $env:GITHUB_WORKSPACE 'build/icon.ico'
+          $dstDir = Join-Path $env:APP_DIR 'build'
+          $dst = Join-Path $dstDir 'icon.ico'
+          if (Test-Path $src) {
+            New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
+            Copy-Item $src $dst -Force
+            Write-Host "Icon copied to $dst"
+          } else {
+            Write-Warning "Root build/icon.ico not found – builder may fallback to default icon."
           }
 
-      # 4) Build（採用 package.json 的設定）
+      # 5) Build（採用 package.json 的設定）
       - name: Build Windows installer (verbose)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
@@ -205,7 +217,7 @@ jobs:
           $env:DEBUG = "electron-builder"
           npx electron-builder --win --publish never --x64 *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/11-electron-builder.log
 
-      # 5) 上傳日誌與產物
+      # 6) 上傳日誌與產物
       - name: Upload CI logs
         if: always()
         uses: actions/upload-artifact@v4
