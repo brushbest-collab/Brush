@@ -13,10 +13,10 @@
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
-    "electron": "^30.5.1",
     "electron-updater": "^6.3.9"
   },
   "devDependencies": {
+    "electron": "^30.5.1",
     "electron-builder": "^24.13.3"
   },
   "build": {
@@ -24,27 +24,13 @@
     "productName": "EVI Brush Desktop",
     "executableName": "evi-brush-desktop",
     "productFilename": "evi-brush-desktop",
-    "directories": {
-      "output": "dist"
-    },
-
-    "files": [
-      "**/*",
-      "!python/venv/**",
-      "!python/models/**",
-      "!logs/**",
-      "!.github/**",
-      "!**/*.log",
-      "!**/*.md"
-    ],
-
+    "directories": { "output": "dist" },
+    "files": ["**/*","!python/venv/**","!python/models/**","!logs/**","!.github/**","!**/*.log","!**/*.md"],
     "extraResources": [
       { "from": "python/models", "to": "resources/python/models", "filter": ["**/*"] }
     ],
-
     "asar": true,
     "asarUnpack": ["python/**"],
-
     "win": {
       "icon": "build/icon.ico",
       "target": ["nsis"],
@@ -60,9 +46,6 @@
       "runAfterFinish": true,
       "uninstallDisplayName": "EVI Brush Desktop"
     },
-
-    "publish": [
-      { "provider": "github" }
-    ]
+    "publish": [{ "provider": "github" }]
   }
 }
