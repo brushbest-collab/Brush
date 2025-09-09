@@ -1,79 +1,121 @@
-// ==== 原本的引用，補上 dialog ====
-const { app, BrowserWindow, dialog } = require('electron');
+'use strict';
+
+const { app, BrowserWindow, dialog, shell } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const { spawn } = require('child_process');
-let pyProc = null;
+const fs = require('fs');
 
-// ==== [新增] 自動更新依賴（有裝 electron-log 則用；沒裝就回落 console）====
-const log = (() => {
+function logToFile(msg) {
   try {
-    const l = require('electron-log');
-    l.transports.file.level = 'info';
-    return l;
-  } catch (e) {
-    return {
-      info: console.log,
-      warn: console.warn,
-      error: console.error,
-      transports: { file: {} },
-    };
-  }
-})();
-
-let autoUpdater = null;
-try {
-  // 需要在 package.json dependencies 安裝 electron-updater
-  ({ autoUpdater } = require('electron-updater'));
-} catch (e) {
-  log.warn('[Updater] electron-updater not installed, auto update disabled');
+    const dir = path.join(app.getPath('userData'), 'logs');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.appendFileSync(path.join(dir, 'main.log'), `[${new Date().toISOString()}] ${msg}\n`);
+  } catch (_) {}
 }
 
-// ==== 原本的程式 ====
-async function waitForServer(url, attempts=100, delay=300) {
+process.on('uncaughtException', (err) => {
+  logToFile(`uncaughtException: ${err.stack || err.message}`);
+});
+
+let pyProc = null;
+
+async function waitForServer(url, attempts = 100, delay = 300) {
   const http = require('http');
   return new Promise((resolve, reject) => {
     let tries = 0;
     const timer = setInterval(() => {
       tries++;
-      http.get(url, res => { clearInterval(timer); resolve(); }).on('error', _ => {
-        if (tries >= attempts) { clearInterval(timer); reject(new Error('Server not responding')); }
-      });
+      http.get(url, () => { clearInterval(timer); resolve(); })
+        .on('error', () => {
+          if (tries >= attempts) { clearInterval(timer); reject(new Error('Server not responding')); }
+        });
     }, delay);
   });
 }
 
 function startPython() {
-  const pyRoot = app.isPackaged ? path.join(process.resourcesPath, 'python') : path.join(__dirname, 'python');
-  const isWin = process.platform === 'win32';
-  const pythonExe = isWin ? path.join(pyRoot, 'venv', 'Scripts', 'python.exe') : path.join(pyRoot, 'venv', 'bin', 'python');
-  const serverScript = path.join(pyRoot, 'server.py');
+  try {
+    const pyRoot = app.isPackaged
+      ? path.join(process.resourcesPath, 'python')
+      : path.join(__dirname, 'python');
 
-  const env = Object.assign({}, process.env, {
-    PYTHONUNBUFFERED: "1",
-    HF_HOME: path.join(pyRoot, 'hf_home'),
-    HF_HUB_OFFLINE: "1"
-  });
-  pyProc = spawn(pythonExe, [serverScript], { cwd: pyRoot, env });
+    const isWin = process.platform === 'win32';
+    const pythonExe = isWin
+      ? path.join(pyRoot, 'venv', 'Scripts', 'python.exe')
+      : path.join(pyRoot, 'venv', 'bin', 'python');
+    const serverScript = path.join(pyRoot, 'server.py');
 
-  pyProc.stdout.on('data', (d) => console.log(`[py] ${d}`));
-  pyProc.stderr.on('data', (d) => console.error(`[py] ${d}`));
-  pyProc.on('close', (c) => console.log(`Python exited: ${c}`));
+    const env = Object.assign({}, process.env, {
+      PYTHONUNBUFFERED: '1',
+      HF_HOME: path.join(pyRoot, 'hf_home'),
+      HF_HUB_OFFLINE: '1',
+    });
+
+    pyProc = spawn(pythonExe, [serverScript], { cwd: pyRoot, env });
+    pyProc.stdout.on('data', (d) => logToFile(`[py] ${d}`));
+    pyProc.stderr.on('data', (d) => logToFile(`[py-err] ${d}`));
+    pyProc.on('close', (c) => logToFile(`Python exited: ${c}`));
+  } catch (e) {
+    logToFile(`startPython error: ${e.stack || e.message}`);
+  }
   return pyProc;
 }
 
-async function createWindow () {
-  const win = new BrowserWindow({ width: 1280, height: 860 });
-  if (!pyProc) { startPython(); }
+async function createWindow() {
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 860,
+    webPreferences: { nodeIntegration: false, contextIsolation: true },
+  });
+
+  if (!pyProc) startPython();
+
   try {
     await waitForServer('http://127.0.0.1:7860');
-    win.loadURL('http://127.0.0.1:7860');
-  } catch(e) {
-    win.loadURL('data:text/html,<h2>Backend did not start. Run freeze script to bundle Python & model, then rebuild installer.</h2>');
+    await win.loadURL('http://127.0.0.1:7860');
+  } catch (e) {
+    logToFile(`waitForServer fail: ${e.message}`);
+    await win.loadURL('data:text/html,<h2>Backend did not start. Please rebuild with Python + model.</h2>');
+  }
+
+  return win;
+}
+
+function setupAutoUpdater(win) {
+  try {
+    autoUpdater.autoDownload = false;
+    autoUpdater.on('update-available', async () => {
+      const r = await dialog.showMessageBox(win, {
+        type: 'question',
+        buttons: ['Download', 'Later'],
+        defaultId: 0,
+        cancelId: 1,
+        message: 'A new version is available. Download now?',
+      });
+      if (r.response === 0) autoUpdater.downloadUpdate();
+    });
+    autoUpdater.on('update-downloaded', async () => {
+      const r = await dialog.showMessageBox(win, {
+        type: 'question',
+        buttons: ['Restart', 'Later'],
+        defaultId: 0,
+        cancelId: 1,
+        message: 'Update downloaded. Restart to install?',
+      });
+      if (r.response === 0) autoUpdater.quitAndInstall();
+    });
+    autoUpdater.on('error', (e) => logToFile(`updater error: ${e.stack || e.message}`));
+    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+  } catch (e) {
+    logToFile(`setupAutoUpdater error: ${e.stack || e.message}`);
   }
 }
 
-// ==== App lifecycle ====
-app.whenReady().then(() => {
-  createWindow();
+app.whenReady().then(async () => {
+  const win = await createWindow();
+  setupAutoUpdater(win);
+});
 
-  // ==== [新增] 自動更新（僅在打
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('quit', () => { if (pyProc) { try { pyProc.kill(); } catch (_) {} } });
