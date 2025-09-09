@@ -1,0 +1,9 @@
+
+diffusers
+transformers
+accelerate
+safetensors
+torch
+xformers; platform_system=="Windows" or platform_system=="Linux"
+gradio
+pillow

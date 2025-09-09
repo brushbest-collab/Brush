@@ -1,0 +1,40 @@
+{
+  "name": "evi-brush-desktop",
+  "version": "0.4.0",
+  "description": "Sport Sneaker \u2014 Multi-View Composite by EVI Brush (Actions Ready)",
+  "main": "main.js",
+  "author": "EVI Brush",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "pack": "electron-builder --dir"
+  },
+  "dependencies": {
+    "electron-store": "^8.1.0"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.evi.brush",
+    "files": [
+      "main.js",
+      "preload.js",
+      "python/**/*",
+      "scripts/**/*",
+      "README.md",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "python",
+        "to": "python"
+      }
+    ],
+    "asarUnpack": [
+      "python/**"
+    ]
+  }
+}
