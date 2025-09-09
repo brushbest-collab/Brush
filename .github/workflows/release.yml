@@ -1,0 +1,178 @@
+name: Release (tag-trigger, auto publish)
+
+on:
+  # 打 tag 會自動發版（例：v0.5.1 或 v0.5.1-full）
+  push:
+    tags: ['v*']
+  # 也可手動觸發並選擇是否打包模型
+  workflow_dispatch:
+    inputs:
+      include_model:
+        description: "Bundle SDXL-Turbo model"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write     # 讓 GITHUB_TOKEN 能建立/上傳 Release
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      # Electron / npm
+      NPM_CONFIG_FUND: false
+      NPM_CONFIG_AUDIT: false
+      # GitHub 上傳用（內建 token）
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # 簽章（可選：在 repo Secrets 設 CSC_LINK / CSC_KEY_PASSWORD）
+      CSC_IDENTITY_AUTO_DISCOVERY: false
+      CSC_LINK: ${{ secrets.CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare logs
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path logs | Out-Null
+
+      # 找到 package.json 所在資料夾
+      - name: Locate app directory
+        id: locate
+        shell: pwsh
+        run: |
+          $pkg = Get-ChildItem -Path . -Filter package.json -Recurse -File -Depth 6 `
+                 | Where-Object { $_.FullName -notmatch '\\node_modules\\' } `
+                 | Select-Object -First 1
+          if (-not $pkg) { throw "package.json not found anywhere in the repo." }
+          "APP_DIR=$($pkg.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "APP_DIR = $($pkg.DirectoryName)"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Node deps (lockfile-aware)
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          if (Test-Path "package-lock.json") { npm ci --loglevel warn } `
+          else { npm install --legacy-peer-deps --loglevel warn }
+
+      - name: Ensure electron-builder available
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: npx --yes electron-builder --version
+
+      # 保障必要的 build 設定（與 build.yml 一致）
+      - name: Patch package.json (exe/shortcuts + publish + model outside asar)
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          function Ensure-Prop { param($o,$n,$d) if (-not ($o.PSObject.Properties.Name -contains $n)) { $o | Add-Member -NotePropertyName $n -NotePropertyValue $d } }
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          Ensure-Prop $pkg 'build' (@{})
+          $b = $pkg.build
+          $b.appId = "com.evi.brush.desktop"
+          $b.productName = "EVI Brush Desktop"
+          $b.executableName = "evi-brush-desktop"
+          $b.productFilename = "evi-brush-desktop"
+          Ensure-Prop $b 'directories' (@{})
+          $b.directories.output = "dist"
+          $b.files = @("**/*","!python/venv/**","!python/models/**","!logs/**","!.github/**","!**/*.log","!**/*.md")
+          $b.extraResources = @(@{ from="python/models"; to="resources/python/models"; filter=@("**/*") })
+          if (-not ($b.PSObject.Properties.Name -contains 'asar')) { $b | Add-Member -NotePropertyName 'asar' -NotePropertyValue $true } else { $b.asar = $true }
+          if (-not ($b.PSObject.Properties.Name -contains 'asarUnpack')) { $b | Add-Member -NotePropertyName 'asarUnpack' -NotePropertyValue @("python/**") } else { $b.asarUnpack = @("python/**") }
+          Ensure-Prop $b 'win' (@{})
+          $b.win.icon = "build/icon.ico"
+          $b.win.target = @("nsis")
+          $b.win.shortcutName = "EVI Brush Desktop"
+          Ensure-Prop $b 'nsis' (@{})
+          $b.nsis.oneClick = $true
+          $b.nsis.perMachine = $false
+          $b.nsis.createDesktopShortcut = "always"
+          $b.nsis.createStartMenuShortcut = $true
+          $b.nsis.shortcutName = "EVI Brush Desktop"
+          $b.nsis.runAfterFinish = $true
+          $b.nsis.uninstallDisplayName = "EVI Brush Desktop"
+          $b.publish = @(@{ provider = "github" })
+          ($pkg | ConvertTo-Json -Depth 100) | Set-Content package.json -Encoding UTF8
+
+      # Python 依賴（模型下載用）
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Prepare venv & deps
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          python -m venv python/venv
+          python/venv/Scripts/python -m pip install --upgrade pip
+          if (Test-Path 'python/requirements.txt') {
+            python/venv/Scripts/pip install -r python/requirements.txt
+          }
+          python/venv/Scripts/pip install huggingface_hub
+
+      # 是否包含模型：tag 名含 -full 或手動 include_model=true 才會下載
+      - name: Decide include model
+        id: model
+        shell: pwsh
+        run: |
+          $ref = "${{ github.ref_name }}"
+          $manual = "${{ github.event.inputs.include_model }}"
+          $include = ($ref -like "*-full") -or ($manual -eq "true")
+          "INCLUDE_MODEL=$include" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "INCLUDE_MODEL = $include"
+
+      - name: Cache SDXL-Turbo
+        if: env.INCLUDE_MODEL == 'True'
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.APP_DIR }}/python/models/sd-turbo
+          key: sdxl-turbo-v1
+
+      - name: Download SDXL-Turbo model
+        if: env.INCLUDE_MODEL == 'True'
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: >
+          python/venv/Scripts/python -c
+          "from huggingface_hub import snapshot_download;
+          from pathlib import Path;
+          p=Path('python/models/sd-turbo'); p.mkdir(parents=True, exist_ok=True);
+          snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(p), local_dir_use_symlinks=False);
+          print('Model downloaded to:', p)"
+
+      - name: Ensure icon exists (warn only)
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          if (-not (Test-Path "build/icon.ico")) {
+            Write-Warning "build/icon.ico not found – packaged app will use default icon."
+          }
+
+      # 產生並上傳到 GitHub Releases（自動更新會讀這裡的 latest.yml）
+      - name: Build & Publish (GitHub Releases)
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          $env:DEBUG = "electron-builder"
+          npx electron-builder --win --x64 --publish always *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/11-electron-builder.log
+
+      - name: Upload release logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-logs
+          path: logs/**
+          if-no-files-found: warn
