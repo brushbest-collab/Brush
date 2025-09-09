@@ -1,9 +1,34 @@
-
-const { app, BrowserWindow } = require('electron');
+// ==== 原本的引用，補上 dialog ====
+const { app, BrowserWindow, dialog } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 let pyProc = null;
 
+// ==== [新增] 自動更新依賴（有裝 electron-log 則用；沒裝就回落 console）====
+const log = (() => {
+  try {
+    const l = require('electron-log');
+    l.transports.file.level = 'info';
+    return l;
+  } catch (e) {
+    return {
+      info: console.log,
+      warn: console.warn,
+      error: console.error,
+      transports: { file: {} },
+    };
+  }
+})();
+
+let autoUpdater = null;
+try {
+  // 需要在 package.json dependencies 安裝 electron-updater
+  ({ autoUpdater } = require('electron-updater'));
+} catch (e) {
+  log.warn('[Updater] electron-updater not installed, auto update disabled');
+}
+
+// ==== 原本的程式 ====
 async function waitForServer(url, attempts=100, delay=300) {
   const http = require('http');
   return new Promise((resolve, reject) => {
@@ -47,6 +72,8 @@ async function createWindow () {
   }
 }
 
-app.whenReady().then(() => { createWindow(); });
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('quit', () => { if (pyProc) { try { pyProc.kill(); } catch(e){} } });
+// ==== App lifecycle ====
+app.whenReady().then(() => {
+  createWindow();
+
+  // ==== [新增] 自動更新（僅在打
