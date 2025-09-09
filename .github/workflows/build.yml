@@ -72,8 +72,8 @@ jobs:
           if (-not (Test-Path "package.json")) { throw "package.json not found in APP_DIR ($env:APP_DIR)" }
           Get-Content package.json | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/04-package.before.txt
 
-      # —— 修補 package.json：固定 EXE/捷徑命名 + 模型移出 asar ——
-      - name: Patch package.json (executable/shortcuts & model outside asar)
+      # —— 修補 package.json：固定 EXE/捷徑命名 + 模型移出 asar + icon 路徑 —— 
+      - name: Patch package.json (exe/shortcuts & model outside asar)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
@@ -88,7 +88,7 @@ jobs:
           Ensure-Prop $pkg 'build' (@{})
           $b = $pkg.build
 
-          # 基本識別
+          # 基本識別與命名
           $b.appId = "com.evi.brush.desktop"
           $b.productName = "EVI Brush Desktop"
           $b.executableName = "evi-brush-desktop"
@@ -101,14 +101,12 @@ jobs:
           # 不把 venv/模型塞進 asar
           $b.files = @("**/*","!python/venv/**","!python/models/**","!logs/**","!.github/**","!**/*.log","!**/*.md")
           $b.extraResources = @(@{ from="python/models"; to="resources/python/models"; filter=@("**/*") })
-
-          # asar 設定
           if (-not ($b.PSObject.Properties.Name -contains 'asar')) { $b | Add-Member -NotePropertyName 'asar' -NotePropertyValue $true } else { $b.asar = $true }
           if (-not ($b.PSObject.Properties.Name -contains 'asarUnpack')) { $b | Add-Member -NotePropertyName 'asarUnpack' -NotePropertyValue @("python/**") } else { $b.asarUnpack = @("python/**") }
 
-          # Windows/NSIS + icon + 捷徑
+          # Windows/NSIS + icon + 捷徑（icon 在 repo 根目錄的 build/）
           Ensure-Prop $b 'win' (@{})
-          $b.win.icon = "build/icon.ico"
+          $b.win.icon = "../build/icon.ico"      # ← 重點：從 APP_DIR 回到根目錄
           $b.win.target = @("nsis")
           $b.win.shortcutName = "EVI Brush Desktop"
 
@@ -116,13 +114,13 @@ jobs:
           $b.nsis.oneClick = $true
           $b.nsis.perMachine = $false
           $b.nsis.allowToChangeInstallationDirectory = $false
-          $b.nsis.createDesktopShortcut = "always"
+          $b.nsis.createDesktopShortcut = $true   # ← 改成布林，避免 'Always' 造成驗證失敗
           $b.nsis.createStartMenuShortcut = $true
           $b.nsis.shortcutName = "EVI Brush Desktop"
           $b.nsis.runAfterFinish = $true
           $b.nsis.uninstallDisplayName = "EVI Brush Desktop"
 
-          # 發佈設定（供自動更新的 release 流程使用）
+          # 發佈設定（供 release.yml 自動更新使用）
           $b.publish = @(@{ provider = "github" })
 
           ($pkg | ConvertTo-Json -Depth 100) | Set-Content package.json -Encoding UTF8
@@ -161,7 +159,7 @@ jobs:
           }
           python/venv/Scripts/pip install huggingface_hub *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/09-pip-hf.log
 
-      # 3.5) 是否要把模型一起打包？預設「push 不下載」、手動觸發可選
+      # 是否打包模型（手動觸發時才下載）
       - name: Decide include model
         id: model
         shell: pwsh
@@ -190,13 +188,13 @@ jobs:
           snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False);
           print('Model downloaded to:', target)" *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/10-model-download.log
 
-      # Icon 檢查（缺檔不擋 build，只提醒）
+      # Icon 檢查（非阻斷）
       - name: Ensure icon exists (non-blocking)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          if (-not (Test-Path "build/icon.ico")) {
-            Write-Warning "build/icon.ico not found – electron-builder will use default icon."
+          if (-not (Test-Path "../build/icon.ico")) {
+            Write-Warning "icon not found at ../build/icon.ico – electron-builder will use default icon."
           }
 
       # 4) Build（採用 package.json 的設定）
