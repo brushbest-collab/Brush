@@ -1,0 +1,49 @@
+name: Build Desktop App
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Node deps
+        run: npm ci
+
+      - name: Prepare Python venv + download SD-Turbo model
+        shell: pwsh
+        run: |
+          python -m venv python/venv
+          python/venv/Scripts/pip install --upgrade pip
+          python/venv/Scripts/pip install -r python/requirements.txt huggingface_hub
+          python - << 'PY'
+          from huggingface_hub import snapshot_download
+          from pathlib import Path
+          target = Path("python/models/sd-turbo"); target.mkdir(parents=True, exist_ok=True)
+          snapshot_download(repo_id="stabilityai/sd-turbo", local_dir=target.as_posix(), local_dir_use_symlinks=False)
+          print("Model downloaded to", target)
+          PY
+
+      - name: Build Windows installer
+        run: npx electron-builder --win
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows
+          path: dist/**
+          if-no-files-found: error
