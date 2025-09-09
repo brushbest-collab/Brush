@@ -12,14 +12,20 @@ jobs:
   build-windows:
     runs-on: windows-latest
     env:
-      # 避免 electron-builder 嘗試找簽章導致卡住
+      # 避免 electron-builder 嘗試找簽章造成卡住
       CSC_IDENTITY_AUTO_DISCOVERY: false
-      # 如需下載私有模型，打開下一行並在 Repo → Settings → Secrets 設定 HF_TOKEN
+      # 若需下載私有模型：在 Repo → Settings → Secrets 建立 HF_TOKEN，並啟用下一行
       # HUGGINGFACEHUB_API_TOKEN: ${{ secrets.HF_TOKEN }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Show workspace (debug)
+        shell: pwsh
+        run: |
+          Write-Host "Workspace:" (Get-Location)
+          Get-ChildItem -Force
 
       # ---- Node ----
       - name: Setup Node
@@ -54,10 +60,9 @@ jobs:
           if (Test-Path 'python/requirements.txt') {
             python/venv/Scripts/pip install -r python/requirements.txt
           }
-          # 需要 huggingface_hub 來下載模型
           python/venv/Scripts/pip install huggingface_hub
 
-      - name: Download SDXL-Turbo model
+      - name: Download SDXL-Turbo model (relative paths only)
         shell: pwsh
         run: >
           python/venv/Scripts/python -c
@@ -70,12 +75,12 @@ jobs:
                             local_dir_use_symlinks=False);
           print('Model downloaded to:', target)"
 
-      # ---- Build ----
+      # ---- Build Electron (outputs to dist/) ----
       - name: Build Windows installer
         run: npx electron-builder --win
-        # 若你有自訂 script，也可用：npm run build:win
+        # 或改為：npm run build:win（若你在 package.json 有對應 script）
 
-      # ---- Artifacts ----
+      # ---- Upload artifacts ----
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
