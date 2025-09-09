@@ -1,4 +1,4 @@
-name: Build Desktop App (auto-fix build config)
+name: Build Desktop App (debuggable)
 
 on:
   workflow_dispatch:
@@ -44,23 +44,10 @@ jobs:
           "APP_DIR=$($pkg.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "APP_DIR = $($pkg.DirectoryName)"
 
-      - name: Show workspace tree
-        shell: pwsh
-        run: |
-          "CWD = $(Get-Location)" | Tee-Object -FilePath logs/00-cwd.txt
-          Get-ChildItem -Recurse -Force | Select-Object FullName, Length |
-            Format-Table -AutoSize | Out-String | Tee-Object -FilePath logs/01-tree.txt
-          "APP_DIR = $env:APP_DIR" | Tee-Object -FilePath logs/01a-appdir.txt
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
-
-      - name: Print Node/NPM versions
-        run: |
-          node -v | Tee-Object -FilePath logs/02-node.txt
-          npm -v  | Tee-Object -FilePath logs/03-npm.txt -Append
 
       - name: Ensure package.json exists in APP_DIR
         shell: pwsh
@@ -69,8 +56,8 @@ jobs:
           if (-not (Test-Path "package.json")) { throw "package.json not found in APP_DIR ($env:APP_DIR)" }
           Get-Content package.json | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/04-package.before.txt
 
-      # —— 以「最小合規」重寫 build 區塊，避免歷史鍵驗證失敗 —— 
-      - name: Overwrite package.json build config (clean minimal config)
+      # —— 最小且可偵錯的 build 設定（asar: false）——
+      - name: Overwrite package.json build config (no asar for debug)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
@@ -81,8 +68,7 @@ jobs:
             directories     = @{ output = "dist" };
             files           = @("**/*","!python/venv/**","!python/models/**","!logs/**","!.github/**","!**/*.log","!**/*.md");
             extraResources  = @(@{ from="python/models"; to="resources/python/models"; filter=@("**/*") });
-            asar            = $true;
-            asarUnpack      = @("python/**");
+            asar            = $false;   # ← 關閉 asar，安裝後可直接看到 resources/app/*.js
             win             = @{ icon="build/icon.ico"; target=@("nsis") };
             nsis            = @{
               oneClick                          = $true;
@@ -94,7 +80,7 @@ jobs:
               runAfterFinish                    = $true;
               uninstallDisplayName              = "EVI Brush Desktop";
             };
-            publish        = @(@{ provider = "github" });
+            publish         = @(@{ provider = "github" });
           }
           ($pkg | ConvertTo-Json -Depth 100) | Set-Content package.json -Encoding UTF8
           Get-Content package.json | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/04-package.after.txt | Out-Null
@@ -103,16 +89,12 @@ jobs:
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          if (Test-Path "package-lock.json") {
-            npm ci --loglevel verbose *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/05-npm-install.log
-          } else {
-            npm install --legacy-peer-deps --loglevel verbose *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/05-npm-install.log
-          }
+          if (Test-Path "package-lock.json") { npm ci --loglevel verbose } else { npm install --legacy-peer-deps --loglevel verbose }
 
       - name: Ensure electron-builder available
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
-        run: npx --yes electron-builder --version *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/06-electron-builder-version.txt
+        run: npx --yes electron-builder --version
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -125,11 +107,9 @@ jobs:
         working-directory: ${{ env.APP_DIR }}
         run: |
           python -m venv python/venv
-          python/venv/Scripts/python -m pip install --upgrade pip *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/07-pip-upgrade.log
-          if (Test-Path 'python/requirements.txt') {
-            python/venv/Scripts/pip install -r python/requirements.txt *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/08-pip-req.log
-          }
-          python/venv/Scripts/pip install huggingface_hub *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/09-pip-hf.log
+          python/venv/Scripts/python -m pip install --upgrade pip
+          if (Test-Path 'python/requirements.txt') { python/venv/Scripts/pip install -r python/requirements.txt }
+          python/venv/Scripts/pip install huggingface_hub
 
       - name: Decide include model
         id: model
@@ -156,8 +136,15 @@ jobs:
           "from huggingface_hub import snapshot_download;
           from pathlib import Path;
           target=Path('python/models/sd-turbo'); target.mkdir(parents=True, exist_ok=True);
-          snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False);
-          print('Model downloaded to:', target)" *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/10-model-download.log
+          snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False)"
+
+      # 先做一次 main.js 語法檢查（會先失敗，避免把壞檔打包）
+      - name: Syntax-check main.js
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          if (-not (Test-Path "main.js")) { throw "main.js not found in APP_DIR" }
+          node -e "require('vm').runInNewContext(require('fs').readFileSync('main.js','utf8'))"
 
       - name: Put icon under APP_DIR/build (required by electron-builder)
         shell: pwsh
@@ -165,15 +152,8 @@ jobs:
           $src = Join-Path $env:GITHUB_WORKSPACE 'build/icon.ico'
           $dstDir = Join-Path $env:APP_DIR 'build'
           $dst = Join-Path $dstDir 'icon.ico'
-          if (Test-Path $src) {
-            New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
-            Copy-Item $src $dst -Force
-            Write-Host "Icon copied to $dst"
-          } else {
-            Write-Warning "Root build/icon.ico not found – builder may fallback to default icon."
-          }
+          if (Test-Path $src) { New-Item -ItemType Directory -Force -Path $dstDir | Out-Null; Copy-Item $src $dst -Force }
 
-      # —— 重點：有產物就視為成功 —— 
       - name: Build Windows installer (verbose; succeed if artifacts exist)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
@@ -183,13 +163,8 @@ jobs:
           $code = $LASTEXITCODE
           $has = Get-ChildItem dist -Include *.exe,*.msi,*.zip,*.7z -Recurse -ErrorAction SilentlyContinue
           if ($code -ne 0) {
-            if ($has) {
-              Write-Warning "electron-builder returned $code but installers exist → continue."
-              exit 0
-            } else {
-              Write-Error "electron-builder failed with exit code $code and no installers were produced."
-              exit $code
-            }
+            if ($has) { Write-Warning "builder returned $code but installers exist → continue."; exit 0 }
+            else { Write-Error "builder failed with $code and no installers were produced."; exit $code }
           }
 
       - name: Upload CI logs
@@ -210,4 +185,21 @@ jobs:
             ${{ env.APP_DIR }}/dist/*.msi
             ${{ env.APP_DIR }}/dist/*.zip
             ${{ env.APP_DIR }}/dist/*.7z
+          if-no-files-found: warn
+
+      # 另外把未壓縮的 app 與 app.asar/win-unpacked 一起傳上來，方便檢查
+      - name: Upload win-unpacked
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-unpacked
+          path: ${{ env.APP_DIR }}/dist/win-unpacked/**
+          if-no-files-found: warn
+
+      - name: Upload app folder (debug, since asar=false)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-folder
+          path: ${{ env.APP_DIR }}/dist/win-unpacked/resources/app/**
           if-no-files-found: warn
