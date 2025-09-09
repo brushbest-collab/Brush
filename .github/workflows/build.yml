@@ -1,4 +1,4 @@
-name: Build Desktop App (auto-detect app dir)
+name: Build Desktop App (auto-fix build config)
 
 on:
   workflow_dispatch:
@@ -15,6 +15,7 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: false
       NPM_CONFIG_FUND: false
       NPM_CONFIG_AUDIT: false
+      # 如需私有模型，於 Repo → Settings → Secrets 建立 HF_TOKEN，並啟用下一行
       # HUGGINGFACEHUB_API_TOKEN: ${{ secrets.HF_TOKEN }}
 
     steps:
@@ -25,7 +26,7 @@ jobs:
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path logs | Out-Null
 
-      # === 1) 自動尋找含有 package.json 的專案資料夾 ===
+      # 1) 找出含 package.json 的應用資料夾
       - name: Locate app directory (where package.json lives)
         id: locate
         shell: pwsh
@@ -46,8 +47,8 @@ jobs:
             Format-Table -AutoSize | Out-String | Tee-Object -FilePath logs/01-tree.txt
           "APP_DIR = $env:APP_DIR" | Tee-Object -FilePath logs/01a-appdir.txt
 
-      # === 2) Node ===
-      - name: Setup Node (no cache to avoid lockfile issues)
+      # 2) Node（不使用 cache，避免 lockfile 限制）
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -62,7 +63,36 @@ jobs:
         working-directory: ${{ env.APP_DIR }}
         run: |
           if (-not (Test-Path "package.json")) { throw "package.json not found in APP_DIR ($env:APP_DIR)" }
-          Get-Content package.json | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/04-package.json.txt
+          Get-Content package.json | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/04-package.before.txt
+
+      # 自動修補 package.json 的 build 設定：把模型移出 asar，以 extraResources 帶入
+      - name: Patch package.json build config (move model out of asar)
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          if (-not $pkg.build) { $pkg | Add-Member -NotePropertyName build -NotePropertyValue (@{}) }
+          if (-not $pkg.build.directories) { $pkg.build | Add-Member -NotePropertyName directories -NotePropertyValue (@{}) }
+          $pkg.build.directories.output = "dist"
+
+          # files：保留全部、但排除 venv 與 models
+          $files = @("**/*", "!python/venv/**", "!python/models/**")
+          $pkg.build.files = $files
+
+          # extraResources：把模型整個帶入 resources/python/models
+          $er = @(@{ from = "python/models"; to = "resources/python/models"; filter = @("**/*") })
+          $pkg.build.extraResources = $er
+
+          # asar 與 asarUnpack
+          $pkg.build.asar = $true
+          $pkg.build.asarUnpack = @("python/**")
+
+          # Windows 目標
+          if (-not $pkg.build.win) { $pkg.build | Add-Member -NotePropertyName win -NotePropertyValue (@{}) }
+          $pkg.build.win.target = @("nsis")
+
+          # 輸出修補後結果
+          ($pkg | ConvertTo-Json -Depth 100) | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/04-package.after.txt | Set-Content package.json
 
       - name: Install Node deps (lockfile-aware, verbose)
         shell: pwsh
@@ -82,7 +112,7 @@ jobs:
         run: |
           npx --yes electron-builder --version *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/06-electron-builder-version.txt
 
-      # === 3) Python (在 APP_DIR 內建立 venv 與模型資料夾) ===
+      # 3) Python（在 APP_DIR 內建立 venv 與模型）
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -111,15 +141,14 @@ jobs:
           snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False);
           print('Model downloaded to:', target)" *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/10-model-download.log
 
-      # === 4) Build ===
+      # 4) Build（不再用 CLI 強制 asar，採用 package.json 的設定）
       - name: Build Windows installer (verbose)
         working-directory: ${{ env.APP_DIR }}
         run: >
           npx electron-builder --win --publish never --x64
-          --config.asar=true --config.generateUpdatesFilesForAllChannels=false
           *>&1 | tee $env:GITHUB_WORKSPACE/logs/11-electron-builder.log
 
-      # === 5) Upload logs & artifacts ===
+      # 5) 上傳日誌與產物
       - name: Upload CI logs
         if: always()
         uses: actions/upload-artifact@v4
