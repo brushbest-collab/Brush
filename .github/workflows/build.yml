@@ -12,63 +12,39 @@ jobs:
     timeout-minutes: 90
 
     env:
-      APP_DIR: D:\a\${{ github.event.repository.name }}\${{ github.event.repository.name }}
+      APP_DIR: ${{ github.workspace }}
       LOG_DIR: ${{ github.workspace }}\logs
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Node.js 20
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
 
-      - name: Enable npm cache if lockfile exists
-        shell: pwsh
-        run: |
-          if (Test-Path -LiteralPath "package-lock.json") { Write-Host "Lockfile found." } else { Write-Host "No lockfile."; }
-
-      - name: Install Node dependencies
+      - name: Install Node deps
         shell: pwsh
         run: |
           if (Test-Path -LiteralPath "package-lock.json") { npm ci } else { npm i }
 
-      - name: Set up Python 3.10
+      - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Prepare Python venv (optional marker only)
+      - name: Ensure python/pbs folder (safe)
         shell: pwsh
         run: |
-          # 建立 logs
-          New-Item -ItemType Directory -Force -Path $env:LOG_DIR | Out-Null
-          # 只做 pbs 標記，實際 venv 在 Release 流程才建立
           $pyRoot = Join-Path $env:APP_DIR 'python'
           $pbsDir = Join-Path $pyRoot 'pbs'
-          if (Test-Path -LiteralPath $pbsDir -PathType Leaf) {
-            Remove-Item -LiteralPath $pbsDir -Force
-          }
-          if (-not (Test-Path -LiteralPath $pbsDir -PathType Container)) {
-            New-Item -ItemType Directory -Force -Path $pbsDir | Out-Null
-          }
+          New-Item -ItemType Directory -Force -Path $pyRoot | Out-Null
+          if (Test-Path -LiteralPath $pbsDir -PathType Leaf) { Remove-Item -LiteralPath $pbsDir -Force }
+          if (-not (Test-Path -LiteralPath $pbsDir -PathType Container)) { New-Item -ItemType Directory -Force -Path $pbsDir | Out-Null }
+          New-Item -ItemType Directory -Force -Path $env:LOG_DIR | Out-Null
           Set-Content -Path (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii
-
-      - name: Download SDXL-Turbo model (optional smoke)
-        shell: pwsh
-        run: |
-          try {
-            python - << 'PY'
-import os
-from huggingface_hub import snapshot_download
-target = os.path.join("python","models","sd-turbo")
-os.makedirs(target, exist_ok=True)
-snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=target, local_dir_use_symlinks=False)
-print("Model downloaded to:", target)
-PY
-          } catch { Write-Host "Skip optional model download." }
 
       - name: Build (no publish)
         shell: pwsh
