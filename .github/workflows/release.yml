@@ -2,106 +2,13 @@ name: Release (Win + model, GitHub Releases)
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Release tag (例如 v1.2.3；留空則自動產生)"
-        required: false
-        default: ""
 
 permissions:
   contents: write
 
 jobs:
-  release-windows:
+  smoke:
     runs-on: windows-latest
-    timeout-minutes: 120
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      # 沒有 lock 的專案用 `npm i`，避免 npm ci 因缺 lock 檔失敗
-      - name: Install Node deps
-        shell: pwsh
-        run: |
-          npm i
-
-      # 準備 pbs 標記 & 基本資料夾
-      - name: Ensure pbs marker & folders
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path "logs" | Out-Null
-          New-Item -ItemType Directory -Force -Path "python\models\sd-turbo" | Out-Null
-          New-Item -ItemType File -Force -Path "python\pbs" | Out-Null
-
-      - name: Setup Python 3.10
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      # 下載 SDXL-Turbo 模型到 python/models/sd-turbo
-      - name: Download SDXL-Turbo model
-        shell: pwsh
-        env:
-          HF_HUB_ENABLE_HF_TRANSFER: "1"
-        run: |
-          $ErrorActionPreference = 'Stop'
-          python -m pip install -U pip
-          python -m pip install huggingface_hub hf_transfer
-
-          $code = @'
-from huggingface_hub import snapshot_download
-from pathlib import Path
-target = Path("python/models/sd-turbo")
-target.mkdir(parents=True, exist_ok=True)
-snapshot_download(repo_id="stabilityai/sdxl-turbo",
-                  local_dir=str(target),
-                  local_dir_use_symlinks=False)
-print("Model downloaded to:", target)
-'@
-
-          $script = Join-Path $env:RUNNER_TEMP 'download_model.py'
-          Set-Content -Path $script -Value $code -Encoding UTF8
-          python $script 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\model-download.log"
-
-      # 建置（不直接發佈，因為我們會用 release action 上傳）
-      - name: Build app (no publish)
-        shell: pwsh
-        env:
-          DEBUG: "electron-builder"
-        run: |
-          npx electron-builder --win --x64 --publish never 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\eb.log"
-
-      - name: Upload logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: logs/*.log
-
-      - name: Upload installers
-        uses: actions/upload-artifact@v4
-        with:
-          name: installer-windows
-          path: |
-            dist/*.exe
-            dist/*.msi
-            dist/*.zip
-            dist/*.7z
-
-      - name: Create / Update GitHub Release
-        uses: ncipollo/release-action@v1
-        with:
-          tag: ${{ github.event.inputs.tag != '' && github.event.inputs.tag || format('v{0}', github.run_number) }}
-          name: EVI Brush Desktop ${{ github.event.inputs.tag != '' && github.event.inputs.tag || format('build #{0}', github.run_number) }}
-          body: |
-            Automated release by GitHub Actions.
-            - Model: SDXL-Turbo included (python/models/sd-turbo)
-            - PBS marker: python/pbs
-          artifacts: "dist/*.exe,dist/*.msi,dist/*.zip,dist/*.7z"
-          allowUpdates: true
-          replacesArtifacts: true
+      - name: Say hi
+        run: echo "release workflow ok"
