@@ -65,7 +65,7 @@ jobs:
           }
           & $venvPy -m pip install huggingface_hub hf_transfer | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\03-hf.log"
 
-      - name: Download SDXL‑Turbo model
+      - name: Download SDXL-Turbo model
         shell: pwsh
         run: |
           $venvPy = Join-Path $env:APP_DIR 'venv\Scripts\python.exe'
