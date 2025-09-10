@@ -1,0 +1,114 @@
+name: Release (Win + model, GitHub Releases)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.2.3; leave blank to skip tagging)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: pwsh
+    working-directory: ${{ github.workspace }}
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Ensure pbs marker & model folder
+        run: |
+          $root   = $env:GITHUB_WORKSPACE
+          $pbsDir = Join-Path $root 'python\pbs'
+          $mdlDir = Join-Path $root 'python\models\sd-turbo'
+          New-Item -ItemType Directory -Force -Path $pbsDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $mdlDir | Out-Null
+          Set-Content -Path (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii
+
+      - name: Create venv & install deps
+        env:
+          APP_DIR: ${{ github.workspace }}
+        run: |
+          $pyRoot = Join-Path $env:APP_DIR 'resources\python'
+          New-Item -ItemType Directory -Force -Path $pyRoot | Out-Null
+
+          python -m venv (Join-Path $pyRoot 'venv')
+          $venvPy = Join-Path $pyRoot 'venv\Scripts\python.exe'
+
+          & $venvPy -m pip install --upgrade pip *> "$env:GITHUB_WORKSPACE\eb.log"
+          if (Test-Path 'python\requirements.txt') {
+            & $venvPy -m pip install -r 'python\requirements.txt' *>> "$env:GITHUB_WORKSPACE\eb.log"
+          }
+          & $venvPy -m pip install huggingface_hub hf_transfer *>> "$env:GITHUB_WORKSPACE\eb.log"
+
+      - name: Download SDXL-Turbo model
+        env:
+          APP_DIR: ${{ github.workspace }}
+        run: |
+          $mdlDir = Join-Path $env:APP_DIR 'python\models\sd-turbo'
+
+          $script = @"
+from pathlib import Path
+from huggingface_hub import snapshot_download
+import os
+
+os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1'
+target = Path(r"$mdlDir")
+target.mkdir(parents=True, exist_ok=True)
+snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=str(target), local_dir_use_symlinks=False)
+print("Model saved to:", target)
+"@
+
+          $tmp = Join-Path $env:RUNNER_TEMP 'download_model.py'
+          Set-Content -Path $tmp -Value $script -Encoding UTF8
+          $venvPy = Join-Path (Join-Path $env:APP_DIR 'resources\python\venv') 'Scripts\python.exe'
+          & $venvPy $tmp *> "$env:GITHUB_WORKSPACE\model-download.log"
+
+      - name: Install Node dependencies
+        run: |
+          if (Test-Path 'package-lock.json') { npm ci } else { npm i }
+
+      - name: Create tag (optional)
+        if: ${{ inputs.tag != '' }}
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git tag $env:TAG
+          git push origin $env:TAG
+
+      - name: Build & publish with electron-builder
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npx electron-builder --win --x64 --publish always *> "$env:GITHUB_WORKSPACE\eb.log"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-logs
+          path: |
+            ${{ github.workspace }}\eb.log
+            ${{ github.workspace }}\model-download.log
