@@ -26,8 +26,7 @@ jobs:
       NPM_CONFIG_AUDIT: false
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Prepare logs folder
         shell: pwsh
@@ -44,10 +43,8 @@ jobs:
           "APP_DIR=$($pkg.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "APP_DIR = $($pkg.DirectoryName)"
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
 
       - name: Ensure package.json exists in APP_DIR
         shell: pwsh
@@ -56,7 +53,7 @@ jobs:
           if (-not (Test-Path "package.json")) { throw "package.json not found in APP_DIR ($env:APP_DIR)" }
           Get-Content package.json | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/04-package.before.txt
 
-      # —— 最小且可偵錯的 build 設定（asar: false）——
+      # 最小 & 可偵錯設定（asar:false）
       - name: Overwrite package.json build config (no asar for debug)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
@@ -68,17 +65,14 @@ jobs:
             directories     = @{ output = "dist" };
             files           = @("**/*","!python/venv/**","!python/models/**","!logs/**","!.github/**","!**/*.log","!**/*.md");
             extraResources  = @(@{ from="python/models"; to="resources/python/models"; filter=@("**/*") });
-            asar            = $false;   # ← 關閉 asar，安裝後可直接看到 resources/app/*.js
+            asar            = $false;   # debug 展開 app/
             win             = @{ icon="build/icon.ico"; target=@("nsis") };
             nsis            = @{
-              oneClick                          = $true;
-              perMachine                        = $false;
-              allowToChangeInstallationDirectory= $false;
-              createDesktopShortcut             = $true;
-              createStartMenuShortcut           = $true;
-              shortcutName                      = "EVI Brush Desktop";
-              runAfterFinish                    = $true;
-              uninstallDisplayName              = "EVI Brush Desktop";
+              oneClick = $true; perMachine = $false;
+              allowToChangeInstallationDirectory = $false;
+              createDesktopShortcut = $true; createStartMenuShortcut = $true;
+              shortcutName = "EVI Brush Desktop"; runAfterFinish = $true;
+              uninstallDisplayName = "EVI Brush Desktop";
             };
             publish         = @(@{ provider = "github" });
           }
@@ -89,18 +83,16 @@ jobs:
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          if (Test-Path "package-lock.json") { npm ci --loglevel verbose } else { npm install --legacy-peer-deps --loglevel verbose }
+          if (Test-Path "package-lock.json") { npm ci --loglevel verbose }
+          else { npm install --legacy-peer-deps --loglevel verbose }
 
       - name: Ensure electron-builder available
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: npx --yes electron-builder --version
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-          cache: 'pip'
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.10', cache: 'pip' }
 
       - name: Prepare venv & install Python deps
         shell: pwsh
@@ -138,13 +130,13 @@ jobs:
           target=Path('python/models/sd-turbo'); target.mkdir(parents=True, exist_ok=True);
           snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False)"
 
-      # 先做一次 main.js 語法檢查（會先失敗，避免把壞檔打包）
-      - name: Syntax-check main.js
+      # ✅ 修正：只做 parser 檢查，不執行程式碼
+      - name: Syntax-check main.js (parse only)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
           if (-not (Test-Path "main.js")) { throw "main.js not found in APP_DIR" }
-          node -e "require('vm').runInNewContext(require('fs').readFileSync('main.js','utf8'))"
+          node --check main.js
 
       - name: Put icon under APP_DIR/build (required by electron-builder)
         shell: pwsh
@@ -167,17 +159,12 @@ jobs:
             else { Write-Error "builder failed with $code and no installers were produced."; exit $code }
           }
 
-      - name: Upload CI logs
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ci-logs
-          path: logs/**
-          if-no-files-found: warn
+        with: { name: ci-logs, path: logs/**, if-no-files-found: warn }
 
-      - name: Upload installer (if any)
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: installer-windows
           path: |
@@ -187,18 +174,15 @@ jobs:
             ${{ env.APP_DIR }}/dist/*.7z
           if-no-files-found: warn
 
-      # 另外把未壓縮的 app 與 app.asar/win-unpacked 一起傳上來，方便檢查
-      - name: Upload win-unpacked
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: win-unpacked
           path: ${{ env.APP_DIR }}/dist/win-unpacked/**
           if-no-files-found: warn
 
-      - name: Upload app folder (debug, since asar=false)
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: app-folder
           path: ${{ env.APP_DIR }}/dist/win-unpacked/resources/app/**
