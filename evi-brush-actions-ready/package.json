@@ -1,6 +1,6 @@
 {
   "name": "evi-brush-desktop",
-  "version": "0.1.1",
+  "version": "0.1.0",
   "description": "EVI Brush Desktop",
   "main": "main.js",
   "author": "brushbest-collab",
@@ -20,9 +20,13 @@
   "build": {
     "appId": "com.evi.brush.desktop",
     "productName": "EVI Brush Desktop",
-    "directories": { "output": "dist" },
+    "directories": {
+      "output": "dist"
+    },
     "files": [
       "**/*",
+      "!resources/python/venv/**",
+      "!resources/python/models/**",
       "!logs/**",
       "!.git/**",
       "!.github/**",
@@ -30,10 +34,12 @@
       "!**/*.md"
     ],
     "extraResources": [
-      { "from": "resources/python", "to": "resources/python", "filter": ["**/*"] }
+      { "from": "resources/python/models", "to": "python/models", "filter": ["**/*"] },
+      { "from": "resources/python/venv",   "to": "python/venv",   "filter": ["**/*"] },
+      { "from": "resources/python/pbs",    "to": "python/pbs" }
     ],
     "asar": true,
-    "asarUnpack": ["python/**"],
+    "asarUnpack": ["resources/python/**"],
     "win": {
       "icon": "build/icon.ico",
       "target": ["nsis"]
@@ -45,9 +51,7 @@
       "createDesktopShortcut": true,
       "shortcutName": "EVI Brush Desktop",
       "runAfterFinish": true,
-      "uninstallDisplayName": "EVI Brush Desktop",
-      "installerIcon": "build/icon.ico",
-      "uninstallerIcon": "build/icon.ico"
+      "uninstallDisplayName": "EVI Brush Desktop"
     }
   }
 }
