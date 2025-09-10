@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v0.1.1). Leave blank to skip tagging'
+        description: "Release tag（例如 v0.1.1；留空則自動用日期）"
         required: false
-        default: ''
+        default: ""
 
 permissions:
   contents: write
@@ -14,88 +14,116 @@ permissions:
 jobs:
   release-windows:
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
+
     env:
-      APP_DIR: ${{ github.workspace }}
+      APP_DIR: D:\a\${{ github.event.repository.name }}\${{ github.event.repository.name }}
+      LOG_DIR: ${{ github.workspace }}\logs
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
       - name: Install Node dependencies
         shell: pwsh
         run: |
-          if (Test-Path package-lock.json) { npm ci } else { npm i }
+          if (Test-Path -LiteralPath "package-lock.json") { npm ci } else { npm i }
 
-      - name: Setup Python 3.10
+      - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
 
       - name: Ensure pbs marker & model dirs
         shell: pwsh
         run: |
-          $pyDir  = Join-Path $env:APP_DIR 'python'
-          $pbsDir = Join-Path $pyDir 'pbs'
-          $mdlDir = Join-Path $pyDir 'models\sd-turbo'
-          [System.IO.Directory]::CreateDirectory($pyDir)  | Out-Null
-          [System.IO.Directory]::CreateDirectory($pbsDir) | Out-Null
-          [System.IO.Directory]::CreateDirectory($mdlDir) | Out-Null
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path $env:LOG_DIR | Out-Null
+
+          $pyRoot = Join-Path $env:APP_DIR 'python'
+          $pbsDir = Join-Path $pyRoot 'pbs'
+          $modelRoot = Join-Path $pyRoot 'models'
+          # pbs 同名若是檔案，先移除再建資料夾；若是資料夾就直接用
+          if (Test-Path -LiteralPath $pbsDir -PathType Leaf) {
+            Remove-Item -LiteralPath $pbsDir -Force
+          }
+          if (-not (Test-Path -LiteralPath $pbsDir -PathType Container)) {
+            New-Item -ItemType Directory -Force -Path $pbsDir | Out-Null
+          }
           Set-Content -Path (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii
 
-      - name: Prepare Python venv (optional)
+          New-Item -ItemType Directory -Force -Path $modelRoot | Out-Null
+
+      - name: Prepare Python venv + deps + PBS marker
         shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
         run: |
-          python -m venv "$env:APP_DIR\python\venv"
-          $venvPy = Join-Path $env:APP_DIR 'python\venv\Scripts\python.exe'
-          & $venvPy -m pip install --upgrade pip wheel
-          if (Test-Path "$env:APP_DIR\python\requirements.txt") {
-            & $venvPy -m pip install -r "$env:APP_DIR\python\requirements.txt"
-          }
-          & $venvPy -m pip install huggingface_hub hf_transfer
+          $ErrorActionPreference = 'Stop'
+          $pyRoot = Join-Path $env:APP_DIR 'python'
+          $venvDir = Join-Path $pyRoot 'venv'
+          $venvPy  = Join-Path $venvDir 'Scripts\python.exe'
+
+          # 建立 venv
+          python -m venv $venvDir
+          & $venvPy -m pip install --upgrade pip *> "$env:LOG_DIR\01_pip_upgrade.log"
+          # 下載模型要用到 huggingface_hub 與 hf_transfer
+          & $venvPy -m pip install huggingface_hub hf_transfer *> "$env:LOG_DIR\02_pip_hf.log"
 
       - name: Download SDXL-Turbo model
         shell: pwsh
-        env:
-          HF_HUB_ENABLE_HF_TRANSFER: '1'
+        working-directory: ${{ env.APP_DIR }}
         run: |
-          $s = @'
-          from huggingface_hub import snapshot_download
-          from pathlib import Path
-          p = Path("python/models/sd-turbo")
-          p.mkdir(parents=True, exist_ok=True)
-          snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=str(p), local_dir_use_symlinks=False)
-          print("Model downloaded to", p)
-          '@
-          $tf = Join-Path $env:RUNNER_TEMP "dl_model.py"
-          $s | Set-Content -Path $tf -Encoding UTF8
-          $venvPy = Join-Path $env:APP_DIR 'python\venv\Scripts\python.exe'
-          if (Test-Path $venvPy) { & $venvPy $tf } else { python $tf }
+          $ErrorActionPreference = 'Stop'
+          $pyRoot   = Join-Path $env:APP_DIR 'python'
+          $venvDir  = Join-Path $pyRoot 'venv'
+          $venvPy   = Join-Path $venvDir 'Scripts\python.exe'
+          $modelDir = Join-Path $pyRoot 'models\sd-turbo'
+          New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
+
+          # 使用 hf_transfer 可走環境加速（可選）
+          $env:HF_HUB_ENABLE_HF_TRANSFER = "1"
+
+          & $venvPy - << 'PY' *> "$env:LOG_DIR\03_model_download.log"
+import os
+from huggingface_hub import snapshot_download
+target = os.path.join("python","models","sd-turbo")
+os.makedirs(target, exist_ok=True)
+snapshot_download(repo_id="stabilityai/sdxl-turbo",
+                  local_dir=target,
+                  local_dir_use_symlinks=False)
+print("Model downloaded to:", target)
+PY
 
       - name: Create tag (optional)
         if: ${{ github.event.inputs.tag != '' }}
         shell: pwsh
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "${{ github.event.inputs.tag }}"
-          git push origin "${{ github.event.inputs.tag }}"
+          git config user.name  "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag $env:INPUT_TAG
+          git push origin $env:INPUT_TAG
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
 
       - name: Build & publish with electron-builder
         shell: pwsh
+        env:
+          # electron-builder 用它發佈 Release
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $ErrorActionPreference = "Stop"
-          npx electron-builder --win --x64 --publish always *>&1 | Tee-Object -FilePath "$env:APP_DIR\eb.log"
+          $ErrorActionPreference = 'Stop'
+          $tag = "${{ github.event.inputs.tag }}"
+          if (-not $tag) {
+            $tag = (Get-Date).ToString('yyyy.MM.dd-HHmm')
+          }
+          # 開啟詳細 log
+          npx electron-builder --win --x64 --publish always --config.extraMetadata.version=$tag *> "$env:LOG_DIR\04_eb_release.log"
 
       - name: Upload logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: release-logs
-          path: eb.log
+          path: ${{ env.LOG_DIR }}\**
           if-no-files-found: warn
