@@ -1,0 +1,102 @@
+name: Release (Win + model, GitHub Releases)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0). Leave empty to skip creating a tag.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    name: Release (windows)
+    runs-on: windows-latest
+
+    env:
+      APP_DIR: ${{ github.workspace }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Make logs dir
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\logs" | Out-Null
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Ensure pbs marker and model dir
+        shell: pwsh
+        run: |
+          $pyDir  = Join-Path $env:APP_DIR 'python'
+          $pbsDir = Join-Path $pyDir 'pbs'
+          $mdlDir = Join-Path $pyDir 'models\sd-turbo'
+          New-Item -ItemType Directory -Force -Path $pbsDir | Out-Null
+          Set-Content -Path (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii
+          New-Item -ItemType Directory -Force -Path $mdlDir | Out-Null
+
+      - name: Install Node dependencies
+        shell: pwsh
+        run: |
+          if (Test-Path 'package-lock.json') { npm ci } else { npm i }
+
+      - name: Create venv & install python deps
+        shell: pwsh
+        run: |
+          python -m venv venv
+          $venvPy = Join-Path $env:APP_DIR 'venv\Scripts\python.exe'
+          & $venvPy -m pip install --upgrade pip wheel | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\01-pip-upgrade.log"
+          if (Test-Path 'python/requirements.txt') {
+            & $venvPy -m pip install -r 'python/requirements.txt' | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\02-reqs.log"
+          }
+          & $venvPy -m pip install huggingface_hub hf_transfer | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\03-hf.log"
+
+      - name: Download SDXL‑Turbo model
+        shell: pwsh
+        run: |
+          $venvPy = Join-Path $env:APP_DIR 'venv\Scripts\python.exe'
+          $mdlDir = Join-Path $env:APP_DIR 'python\models\sd-turbo'
+          $code = @"
+from huggingface_hub import snapshot_download
+import os
+target = r"$mdlDir"
+os.makedirs(target, exist_ok=True)
+snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=target, local_dir_use_symlinks=False)
+print("Model saved to:", target)
+"@
+          $code | & $venvPy - | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\04-model-download.log"
+
+      - name: Create tag (optional)
+        if: ${{ inputs.tag != '' }}
+        shell: pwsh
+        run: |
+          git config user.name  "github-actions"
+          git config user.email "actions@github.com"
+          git tag ${{ inputs.tag }}
+          git push origin ${{ inputs.tag }}
+
+      - name: Build & publish with electron-builder
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npx electron-builder --win --x64 --publish always 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\05-eb.log"
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-logs
+          path: logs/**
