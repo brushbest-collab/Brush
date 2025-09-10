@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>EVI Brush Desktop</title>
+<body>
+  <h1>EVI Brush Desktop</h1>
+  <div id="status">Checking backend...</div>
+  <script>
+    (async () => {
+      const s = document.getElementById('status');
+      const r = await window.api.checkPbs();
+      s.textContent = (r === 'ok')
+        ? 'Python bootstrap found.'
+        : 'Backend did not start. portable Python bootstrap not found (python/pbs).';
+    })();
+  </script>
+</body>
