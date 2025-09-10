@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v1.2.3; 留空則自動產生)"
+        description: 'Release tag (例如 v0.1.0；留空則自動產生)'
         required: false
         default: ""
 
@@ -15,9 +15,10 @@ jobs:
   release-windows:
     runs-on: windows-latest
     timeout-minutes: 120
+
     env:
       APP_DIR: ${{ github.workspace }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LOG_DIR: ${{ github.workspace }}\logs
 
     steps:
       - name: Checkout
@@ -26,54 +27,125 @@ jobs:
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
+
+      # 只有有 lock 檔才開 npm cache；沒有也能跑
+      - name: Enable npm cache if lockfile exists
+        id: lock
+        shell: pwsh
+        run: |
+          if (Test-Path 'package-lock.json' -or Test-Path 'npm-shrinkwrap.json' -or Test-Path 'yarn.lock') {
+            "has_lockfile=true"  >> $env:GITHUB_OUTPUT
+          } else {
+            "has_lockfile=false" >> $env:GITHUB_OUTPUT
+          }
 
       - name: Install Node deps
+        if: steps.lock.outputs.has_lockfile == 'true'
         shell: pwsh
         run: |
           if (Test-Path 'package-lock.json') { npm ci } else { npm i }
 
-      - name: Ensure pbs marker exists
+      - name: Prepare Python (venv + deps + PBS 標記)
         shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
         run: |
-          New-Item -ItemType Directory -Force -Path "python\models\sd-turbo" | Out-Null
-          Set-Content -Path "python/pbs" -Value "ok" -Encoding ascii
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path "${{ env.LOG_DIR }}" | Out-Null
+
+          $pyRoot = Join-Path $env:APP_DIR 'resources\python'
+          New-Item -ItemType Directory -Force -Path $pyRoot | Out-Null
+
+          python -m venv (Join-Path $pyRoot 'venv')
+          $venvPy = Join-Path $pyRoot 'venv\Scripts\python.exe'
+
+          & $venvPy -m pip install --upgrade pip wheel `
+            | Tee-Object -FilePath "$env:LOG_DIR\01-pip.log"
+
+          if (Test-Path 'python/requirements.txt') {
+            & $venvPy -m pip install -r 'python/requirements.txt' `
+              | Tee-Object -FilePath "$env:LOG_DIR\02-req.log"
+          }
+
+          & $venvPy -m pip install huggingface_hub hf_transfer `
+            | Tee-Object -FilePath "$env:LOG_DIR\03-hf.log"
+
+          # portable python bootstrap 標記檔（避免 app 啟動找不到 pbs）
+          Set-Content -Path (Join-Path $pyRoot 'pbs') -Value 'ok' -Encoding ascii
 
       - name: Download SDXL-Turbo model
         shell: pwsh
-        run: |
-          python -m pip install -U pip huggingface_hub hf_transfer
-          python - << 'PY'
-          import os
-          from huggingface_hub import snapshot_download
-          os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1'
-          target = os.path.join('python','models','sd-turbo')
-          os.makedirs(target, exist_ok=True)
-          snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=target, local_dir_use_symlinks=False)
-          print('Model saved to', target)
-          PY
-
-      - name: Build installer
-        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          HF_HUB_ENABLE_HF_TRANSFER: "1"
         run: |
           $ErrorActionPreference = 'Stop'
-          npx electron-builder --win --x64 --publish=never *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\eb.log"
+          $venvPy = Join-Path $env:APP_DIR 'resources\python\venv\Scripts\python.exe'
+
+          $script = @"
+from pathlib import Path
+from huggingface_hub import snapshot_download
+
+target = Path('python/models/sd-turbo')
+target.mkdir(parents=True, exist_ok=True)
+
+snapshot_download(
+    repo_id='stabilityai/sdxl-turbo',
+    local_dir=str(target),
+    local_dir_use_symlinks=False
+)
+
+print('Model at', target)
+"@
+
+          $tmp = Join-Path $env:RUNNER_TEMP 'download_model.py'
+          Set-Content -Path $tmp -Value $script -Encoding UTF8
+          & $venvPy $tmp *>&1 | Tee-Object -FilePath "$env:LOG_DIR\model-download.log"
+
+      - name: Build (no publish)
+        shell: pwsh
+        run: |
+          $env:DEBUG = "electron-builder"
+          npx electron-builder --win --x64 --publish never *>&1 `
+            | Tee-Object -FilePath "$env:LOG_DIR\eb.log"
+
+          $has = Get-ChildItem dist -Include *.exe,*.msi,*.zip,*.7z -Recurse
+          if (-not $has) { throw "No installers produced." }
 
       - name: Create tag (optional)
         if: ${{ inputs.tag != '' }}
         shell: pwsh
+        env:
+          TAG: ${{ inputs.tag }}
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git tag "${{ inputs.tag }}"
-          git push origin "${{ inputs.tag }}"
+          git config user.name  "github-actions"
+          git config user.email "actions@github.com"
+          git tag $env:TAG
+          git push origin $env:TAG
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        shell: pwsh
+        run: |
+          $tag = if ($env:TAG) { $env:TAG } else { "v${{ github.run_number }}" }
+          gh release create $tag --title "EVI Brush $tag" --notes "Automated release $tag" --latest
+
+      - name: Upload installers to Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        shell: pwsh
+        run: |
+          $tag = if ($env:TAG) { $env:TAG } else { "v${{ github.run_number }}" }
+          Get-ChildItem dist -File -Recurse | ForEach-Object {
+            gh release upload $tag $_.FullName --clobber
+          }
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ inputs.tag != '' && inputs.tag || github.ref_name != 'refs/heads/main' && github.ref_name || format('v{0}', github.run_number) }}
-          make_latest: true
-          files: |
-            dist/*.exe
-            dist/*.zip
-            eb.log
+          name: release-logs
+          path: ${{ env.LOG_DIR }}\*.log
