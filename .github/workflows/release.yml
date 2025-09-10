@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g., v1.2.3) — 留空則不建立 tag'
+        description: "Release tag (例如 v1.2.3；留空則不建立 tag)"
         required: false
-        default: ''
+        default: ""
 
 permissions:
   contents: write
@@ -15,14 +15,20 @@ jobs:
   release-windows:
     runs-on: windows-latest
     timeout-minutes: 120
+    env:
+      NPM_CONFIG_FUND: "false"
+      NPM_CONFIG_AUDIT: "false"
 
     steps:
-      - uses: actions/checkout@v4
+      # 0) 取代到工作目錄
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Create logs dir
+      - name: Ensure logs dir
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\logs" | Out-Null
 
+      # 1) 找到 app 目錄（含 package.json 的資料夾）
       - name: Locate app dir
         id: locate
         shell: pwsh
@@ -33,7 +39,8 @@ jobs:
           "APP_DIR=$($pkg.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "APP_DIR = $($pkg.DirectoryName)"
 
-      - name: Setup Node
+      # 2) Node & 相依
+      - name: Setup Node 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -45,73 +52,69 @@ jobs:
           if (Test-Path "package-lock.json") { npm ci --loglevel verbose } else { npm install --legacy-peer-deps --loglevel verbose }
           npx --yes electron-builder --version | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\eb-version.txt"
 
-      - name: Patch package.json (minimal safe build config)
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
-          if (-not $pkg.build) { $pkg | Add-Member -NotePropertyName build -NotePropertyValue (@{}) }
-          $b = $pkg.build
-          $b.productName = "EVI Brush Desktop"
-          $b.appId       = "com.evi.brush.desktop"
-          $b.files       = @("**/*","!python/venv/**")
-          $b.extraResources = @(@{ from = "python/models"; to = "resources/python/models"; filter = @("**/*") })
-          $b.asar        = $true
-          $b.asarUnpack  = @("python/**")
-          if (-not $b.win) { $b | Add-Member -NotePropertyName win -NotePropertyValue (@{}) }
-          $b.win.icon    = "build/icon.ico"
-          $b.win.target  = @("nsis")
-          $pkg.publish   = @(@{ provider = "github" })
-          ($pkg | ConvertTo-Json -Depth 100) | Set-Content -Encoding UTF8 package.json
-
+      # 3) Python + 模型（寫入暫存檔再執行，避免 YAML / here-string 問題）
       - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
 
-      - name: Create venv, deps & download model
+      - name: Create venv, install deps and download model
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          $pyRoot = Join-Path $env:APP_DIR 'resources/python'
+          $pyRoot  = Join-Path $env:APP_DIR 'resources/python'
           New-Item -ItemType Directory -Force -Path $pyRoot | Out-Null
+
+          # 建立 venv
           python -m venv (Join-Path $pyRoot 'venv')
           $venvPy = Join-Path $pyRoot 'venv\Scripts\python.exe'
+
+          # pip & 需求
           & $venvPy -m pip install --upgrade pip
           if (Test-Path 'python/requirements.txt') { & $venvPy -m pip install -r 'python/requirements.txt' }
           & $venvPy -m pip install huggingface_hub hf_transfer
-          $code = @'
-from huggingface_hub import snapshot_download
-from pathlib import Path
-p = Path("python/models/sd-turbo")
-p.mkdir(parents=True, exist_ok=True)
-snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=str(p), local_dir_use_symlinks=False)
-print("Model saved to:", p)
-'@
-          $script = Join-Path $env:RUNNER_TEMP 'dl_model.py'
-          $code | Set-Content -Path $script -Encoding UTF8
-          & $venvPy $script *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\model-download.txt"
 
-      - name: (Optional) create tag
+          # 產生 Python 腳本到暫存資料夾
+          $pyCode = @"
+from pathlib import Path
+from huggingface_hub import snapshot_download
+p = Path('python/models/sd-turbo'); p.mkdir(parents=True, exist_ok=True)
+snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(p), local_dir_use_symlinks=False)
+print('Model saved to:', p)
+"@
+          $tmpPy = Join-Path $env:RUNNER_TEMP 'download_model.py'
+          Set-Content -Path $tmpPy -Value $pyCode -Encoding UTF8
+
+          # 下載模型並寫 log
+          & $venvPy $tmpPy 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\model-download.txt"
+
+      # 4)（可選）建立 tag
+      - name: Create tag (optional)
         if: ${{ inputs.tag != '' }}
         shell: pwsh
         run: |
-          git tag "${{ inputs.tag }}"
-          git push origin "${{ inputs.tag }}"
+          git config user.name  "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag $env:TAG
+          git push origin $env:TAG
+        env:
+          TAG: ${{ inputs.tag }}
 
-      - name: Build & publish with electron-builder
+      # 5) 打包並發佈到 GitHub Releases
+      - name: Build & publish (electron-builder)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $env:DEBUG="electron-builder"
-          npx electron-builder --win --x64 --publish always *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\electron-builder.txt"
+          npx electron-builder --win --x64 --publish always 2>&1 |
+            Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\electron-builder.txt"
 
+      # 6) 上傳 CI 紀錄
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: release-logs
-          path: logs\**
+          path: logs/**
           if-no-files-found: warn
