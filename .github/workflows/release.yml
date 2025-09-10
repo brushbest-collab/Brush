@@ -4,9 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v0.1.0). Leave empty to skip creating a tag.'
+        description: 'Release tag (e.g. v0.1.0). Leave empty to skip tagging.'
         required: false
         default: ''
+  # 為了方便排錯：只要你改了這支 workflow 就會觸發一次
   push:
     branches: [ main ]
     paths:
@@ -17,9 +18,7 @@ permissions:
 
 jobs:
   release-windows:
-    name: Release (windows)
     runs-on: windows-latest
-
     env:
       APP_DIR: ${{ github.workspace }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -42,7 +41,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Ensure pbs marker and model dir
+      - name: Ensure pbs marker & model dirs
         shell: pwsh
         run: |
           $pyDir  = Join-Path $env:APP_DIR 'python'
@@ -52,7 +51,7 @@ jobs:
           Set-Content -Path (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii
           New-Item -ItemType Directory -Force -Path $mdlDir | Out-Null
 
-      - name: Install Node dependencies
+      - name: Install Node deps
         shell: pwsh
         run: |
           if (Test-Path 'package-lock.json') { npm ci } else { npm i }
@@ -62,26 +61,26 @@ jobs:
         run: |
           python -m venv venv
           $venvPy = Join-Path $env:APP_DIR 'venv\Scripts\python.exe'
-          & $venvPy -m pip install --upgrade pip wheel | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\01-pip-upgrade.log"
+          & $venvPy -m pip install --upgrade pip wheel `
+            | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\01-pip-upgrade.log"
           if (Test-Path 'python/requirements.txt') {
-            & $venvPy -m pip install -r 'python/requirements.txt' | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\02-reqs.log"
+            & $venvPy -m pip install -r 'python/requirements.txt' `
+              | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\02-reqs.log"
           }
-          & $venvPy -m pip install huggingface_hub hf_transfer | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\03-hf.log"
+          & $venvPy -m pip install huggingface_hub hf_transfer `
+            | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\03-hf.log"
 
       - name: Download SDXL-Turbo model
         shell: pwsh
         run: |
           $venvPy = Join-Path $env:APP_DIR 'venv\Scripts\python.exe'
           $mdlDir = Join-Path $env:APP_DIR 'python\models\sd-turbo'
-          $code = @"
-from huggingface_hub import snapshot_download
-import os
-target = r"$mdlDir"
-os.makedirs(target, exist_ok=True)
-snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=target, local_dir_use_symlinks=False)
-print("Model saved to:", target)
-"@
-          $code | & $venvPy - | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\04-model-download.log"
+          $escaped = $mdlDir -replace '\\','\\\\'
+          $py = 'from huggingface_hub import snapshot_download; import os; ' +
+                'target=r"'+$escaped+'"; os.makedirs(target, exist_ok=True); ' +
+                'snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=target, local_dir_use_symlinks=False); ' +
+                'print("Model saved to:", target)'
+          & $venvPy -c $py | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\04-model-download.log"
 
       - name: Create tag (optional)
         if: ${{ inputs.tag != '' }}
@@ -96,7 +95,8 @@ print("Model saved to:", target)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          npx electron-builder --win --x64 --publish always 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\05-eb.log"
+          npx electron-builder --win --x64 --publish always 2>&1 `
+            | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\05-eb.log"
 
       - name: Upload logs
         uses: actions/upload-artifact@v4
