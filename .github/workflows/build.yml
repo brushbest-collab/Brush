@@ -9,10 +9,6 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 120
-    env:
-      APP_DIR: ${{ github.workspace }}
-      DOWNLOAD_MODEL: 'false'   # build 不抓模型；release.yml 會改成 true
 
     steps:
       - name: Checkout
@@ -22,68 +18,59 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
       - name: Install Node deps
         shell: pwsh
         run: |
-          if (Test-Path "package-lock.json") { npm ci } else { npm i }
+          if (Test-Path package-lock.json) { npm ci } else { npm i }
 
-      - name: Setup Python 3.10
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Prepare Python (venv + deps + pbs)
+      - name: Prepare Python (venv + deps + PBS marker)
         shell: pwsh
         run: |
-          $pyRoot = Join-Path $env:APP_DIR "resources/python"
+          $pyRoot = Join-Path $env:GITHUB_WORKSPACE 'resources/python'
           New-Item -ItemType Directory -Force -Path $pyRoot | Out-Null
-
-          python -m venv (Join-Path $pyRoot "venv")
-          $venvPy = Join-Path $pyRoot "venv/Scripts/python.exe"
-
+          python -m venv (Join-Path $pyRoot 'venv')
+          $venvPy = Join-Path $pyRoot 'venv/Scripts/python.exe'
           & $venvPy -m pip install --upgrade pip
-          if (Test-Path "python/requirements.txt") {
-            & $venvPy -m pip install -r "python/requirements.txt"
-          }
+          if (Test-Path 'python/requirements.txt') { & $venvPy -m pip install -r 'python/requirements.txt' }
           & $venvPy -m pip install huggingface_hub hf_transfer
+          Set-Content -Path (Join-Path $pyRoot 'pbs') -Value 'ok' -Encoding ascii
 
-          # 讓 App 能偵測到 Python 已就緒
-          Set-Content -Path (Join-Path $pyRoot "pbs") -Value "ok" -Encoding ascii
-
-      - name: (Optional) Download SDXL-Turbo model
-        if: ${{ env.DOWNLOAD_MODEL == 'true' }}
+      - name: Download SDXL-Turbo model
         shell: pwsh
         run: |
-          $pyRoot = Join-Path $env:APP_DIR "resources/python"
-          $venvPy = Join-Path $pyRoot "venv/Scripts/python.exe"
-          $code = @'
-from huggingface_hub import snapshot_download
-from pathlib import Path
-target = Path("resources/python/models/sd-turbo")
-target.mkdir(parents=True, exist_ok=True)
-snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=str(target), local_dir_use_symlinks=False)
-print("Model at", target)
-'@
-          $tmp = Join-Path $env:RUNNER_TEMP "download_model.py"
-          Set-Content -Path $tmp -Value $code -Encoding UTF8
-          & $venvPy $tmp | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\eb.log" -Append
+          $venvPy = Join-Path $env:GITHUB_WORKSPACE 'resources/python/venv/Scripts/python.exe'
+          $lines = @(
+            'from pathlib import Path'
+            'from huggingface_hub import snapshot_download'
+            't=Path(r"resources/python/models/sd-turbo")'
+            't.mkdir(parents=True, exist_ok=True)'
+            'snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=str(t), local_dir_use_symlinks=False)'
+            'print("Model at", t)'
+          )
+          $tmp = Join-Path $env:RUNNER_TEMP 'download_model.py'
+          Set-Content -Path $tmp -Value ($lines -join "`n") -Encoding UTF8
+          & $venvPy $tmp | Tee-Object -FilePath "$env:GITHUB_WORKSPACE/eb.log" -Append
 
       - name: Build (no publish)
         shell: pwsh
         run: |
-          npx electron-builder --win --x64 --publish=never | Tee-Object -FilePath eb.log
-          Get-ChildItem dist -Recurse | Select-Object FullName,Length
+          $ErrorActionPreference = 'Stop'
+          npx electron-builder --win --x64 --publish never *> "$env:GITHUB_WORKSPACE/eb.log"
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
           name: installer-windows
-          path: dist/**/*
+          path: |
+            dist/*.exe
+            dist/*.zip
+          if-no-files-found: warn
 
       - name: Upload logs
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
           path: eb.log
+          if-no-files-found: ignore
