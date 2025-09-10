@@ -9,89 +9,88 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
+
     env:
-      APP_DIR: ${{ github.workspace }}
+      APP_DIR: D:\a\${{ github.event.repository.name }}\${{ github.event.repository.name }}
+      LOG_DIR: ${{ github.workspace }}\logs
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
+      - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+
+      - name: Enable npm cache if lockfile exists
+        shell: pwsh
+        run: |
+          if (Test-Path -LiteralPath "package-lock.json") { Write-Host "Lockfile found." } else { Write-Host "No lockfile."; }
 
       - name: Install Node dependencies
         shell: pwsh
         run: |
-          if (Test-Path package-lock.json) { npm ci } else { npm i }
+          if (Test-Path -LiteralPath "package-lock.json") { npm ci } else { npm i }
 
-      - name: Setup Python 3.10
+      - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
 
-      - name: Ensure pbs marker & model dirs
+      - name: Prepare Python venv (optional marker only)
         shell: pwsh
         run: |
-          $pyDir  = Join-Path $env:APP_DIR 'python'
-          $pbsDir = Join-Path $pyDir 'pbs'
-          $mdlDir = Join-Path $pyDir 'models\sd-turbo'
-          [System.IO.Directory]::CreateDirectory($pyDir)  | Out-Null
-          [System.IO.Directory]::CreateDirectory($pbsDir) | Out-Null
-          [System.IO.Directory]::CreateDirectory($mdlDir) | Out-Null
+          # 建立 logs
+          New-Item -ItemType Directory -Force -Path $env:LOG_DIR | Out-Null
+          # 只做 pbs 標記，實際 venv 在 Release 流程才建立
+          $pyRoot = Join-Path $env:APP_DIR 'python'
+          $pbsDir = Join-Path $pyRoot 'pbs'
+          if (Test-Path -LiteralPath $pbsDir -PathType Leaf) {
+            Remove-Item -LiteralPath $pbsDir -Force
+          }
+          if (-not (Test-Path -LiteralPath $pbsDir -PathType Container)) {
+            New-Item -ItemType Directory -Force -Path $pbsDir | Out-Null
+          }
           Set-Content -Path (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii
 
-      - name: Prepare Python venv (optional)
+      - name: Download SDXL-Turbo model (optional smoke)
         shell: pwsh
         run: |
-          python -m venv "$env:APP_DIR\python\venv"
-          $venvPy = Join-Path $env:APP_DIR 'python\venv\Scripts\python.exe'
-          & $venvPy -m pip install --upgrade pip wheel
-          if (Test-Path "$env:APP_DIR\python\requirements.txt") {
-            & $venvPy -m pip install -r "$env:APP_DIR\python\requirements.txt"
-          }
-          & $venvPy -m pip install huggingface_hub hf_transfer
-
-      - name: Download SDXL-Turbo model
-        shell: pwsh
-        env:
-          HF_HUB_ENABLE_HF_TRANSFER: '1'
-        run: |
-          $s = @'
-          from huggingface_hub import snapshot_download
-          from pathlib import Path
-          p = Path("python/models/sd-turbo")
-          p.mkdir(parents=True, exist_ok=True)
-          snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=str(p), local_dir_use_symlinks=False)
-          print("Model downloaded to", p)
-          '@
-          $tf = Join-Path $env:RUNNER_TEMP "dl_model.py"
-          $s | Set-Content -Path $tf -Encoding UTF8
-          $venvPy = Join-Path $env:APP_DIR 'python\venv\Scripts\python.exe'
-          if (Test-Path $venvPy) { & $venvPy $tf } else { python $tf }
+          try {
+            python - << 'PY'
+import os
+from huggingface_hub import snapshot_download
+target = os.path.join("python","models","sd-turbo")
+os.makedirs(target, exist_ok=True)
+snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=target, local_dir_use_symlinks=False)
+print("Model downloaded to:", target)
+PY
+          } catch { Write-Host "Skip optional model download." }
 
       - name: Build (no publish)
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
-          npx electron-builder --win --x64 --publish never *>&1 | Tee-Object -FilePath "$env:APP_DIR\eb.log"
+          $ErrorActionPreference = 'Stop'
+          npx electron-builder --win --x64 --publish never *> "$env:LOG_DIR\eb.log"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: ${{ env.LOG_DIR }}\**
+          if-no-files-found: warn
 
       - name: Upload installers
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: installer-windows
           path: |
-            dist/*.exe
-            dist/*.msi
-            dist/*.zip
-            dist/*.7z
-          if-no-files-found: warn
-
-      - name: Upload logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: eb.log
+            dist\*.exe
+            dist\*.msi
+            dist\*.zip
           if-no-files-found: warn
