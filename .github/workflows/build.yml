@@ -9,78 +9,89 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 120
-    env:
-      EB_LOG: ${{ github.workspace }}\eb.log
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Locate app (find package.json)
-        id: locate
-        shell: pwsh
-        run: |
-          $pkg = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter package.json -File |
-            Where-Object { $_.FullName -notmatch '\\node_modules\\' } |
-            Select-Object -First 1
-          if ($pkg) {
-            "APP_DIR=$($pkg.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-            "HAS_NODE_APP=true"          | Out-File -FilePath $env:GITHUB_ENV -Append
-            if (Test-Path (Join-Path $pkg.DirectoryName 'package-lock.json')) { "HAS_LOCK=true"  | Out-File -FilePath $env:GITHUB_ENV -Append }
-            else                                                             { "HAS_LOCK=false" | Out-File -FilePath $env:GITHUB_ENV -Append }
-            Write-Host "App dir = $($pkg.DirectoryName)"
-          } else {
-            "HAS_NODE_APP=false" | Out-File -FilePath $env:GITHUB_ENV -Append
-            "APP_DIR=$env:GITHUB_WORKSPACE" | Out-File -FilePath $env:GITHUB_ENV -Append
-            Write-Warning "No package.json found. Node build steps will be skipped."
-          }
-
       - name: Setup Node.js 20
-        if: env.HAS_NODE_APP == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
       - name: Install Node dependencies
-        if: env.HAS_NODE_APP == 'true'
-        working-directory: ${{ env.APP_DIR }}
         shell: pwsh
         run: |
-          if (Test-Path 'package-lock.json') { npm ci } else { npm i }
+          if (Test-Path package-lock.json) { npm ci } else { npm i }
 
-      - name: Ensure icon exists (optional)
-        if: env.HAS_NODE_APP == 'true'
-        working-directory: ${{ env.APP_DIR }}
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Create venv & install Python deps
         shell: pwsh
         run: |
-          $candidates = @('assets\icon.ico','build\icon.ico','icon.ico')
-          if (-not ($candidates | ForEach-Object { Test-Path $_ } | Where-Object { $_ } )) {
-            Write-Warning "No custom icon found (assets\icon.ico / build\icon.ico / icon.ico). Electron default icon will be used."
+          $app = Resolve-Path .
+          $pyRoot = Join-Path $app 'resources/python'
+          $venv   = Join-Path $pyRoot 'venv'
+          New-Item -ItemType Directory -Force -Path $pyRoot | Out-Null
+
+          python -m venv $venv
+          $venvPy = Join-Path $venv 'Scripts/python.exe'
+
+          & $venvPy -m pip install --upgrade pip wheel
+          if (Test-Path 'python/requirements.txt') {
+            & $venvPy -m pip install -r 'python/requirements.txt'
           }
+          & $venvPy -m pip install huggingface_hub hf_transfer
+
+          # portable bootstrap marker
+          New-Item -ItemType File -Force -Path (Join-Path $pyRoot 'pbs') | Out-Null
+
+      - name: Download SDXL-Turbo model (best-effort)
+        shell: pwsh
+        env:
+          HF_HUB_ENABLE_HF_TRANSFER: "1"
+        run: |
+          $app   = Resolve-Path .
+          $pyRoot = Join-Path $app 'resources/python'
+          $venvPy = Join-Path $pyRoot 'venv/Scripts/python.exe'
+          $log = Join-Path $env:GITHUB_WORKSPACE 'logs\model-download.txt'
+          New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
+
+          $code = @"
+from huggingface_hub import snapshot_download
+from pathlib import Path
+root = Path(r'''$pyRoot''')
+target = root / 'models' / 'sd-turbo'
+target.mkdir(parents=True, exist_ok=True)
+try:
+    snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False)
+    print('Model saved to', target)
+except Exception as e:
+    print('Model download skipped:', e)
+"@
+          $code | Out-File dl.py -Encoding utf8
+          & $venvPy dl.py *>&1 | Tee-Object -FilePath $log
+          Remove-Item dl.py -Force
 
       - name: Build (no publish)
-        if: env.HAS_NODE_APP == 'true'
-        working-directory: ${{ env.APP_DIR }}
         shell: pwsh
-        continue-on-error: true
         run: |
-          $ErrorActionPreference = 'continue'
-          npx electron-builder --win --x64 --publish never *>&1 | Tee-Object -FilePath $env:EB_LOG
-          if (Test-Path '.\dist') { Write-Host "dist exists." } else { Write-Warning "No installers produced." }
+          $env:CI = "true"
+          npx electron-builder --win --x64 --publish never *> eb.log
 
       - name: Upload installers
-        if: env.HAS_NODE_APP == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: installer-windows
-          path: ${{ env.APP_DIR }}\dist\**
+          path: dist/*
 
       - name: Upload logs
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
           path: |
-            ${{ env.EB_LOG }}
-          if-no-files-found: warn
+            eb.log
+            logs/**/*.txt
