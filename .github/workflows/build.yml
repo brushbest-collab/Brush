@@ -1,4 +1,4 @@
-name: Build Desktop App (debuggable, full-python)
+name: Build Desktop App (portable-python, first-run venv)
 
 on:
   workflow_dispatch:
@@ -16,230 +16,130 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
-    # ↑ 可改 windows-2022 也行
-    timeout-minutes: 180                  # ← 由 60 提高到 180
-    concurrency:
-      group: build-${{ github.ref }}
-      cancel-in-progress: true
-    env:
-      CSC_IDENTITY_AUTO_DISCOVERY: false
-      NPM_CONFIG_FUND: false
-      NPM_CONFIG_AUDIT: false
+    timeout-minutes: 180
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare logs folder
+      - name: Prepare logs
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path logs | Out-Null
 
-      - name: Locate app directory (where package.json lives)
+      - name: Locate app dir
         id: locate
         shell: pwsh
         run: |
-          $pkg = Get-ChildItem -Path . -Filter package.json -Recurse -File -Depth 6 `
-                 | Where-Object { $_.FullName -notmatch '\\node_modules\\' } `
-                 | Select-Object -First 1
-          if (-not $pkg) { throw "package.json not found anywhere in the repo." }
-          "APP_DIR=$($pkg.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "APP_DIR = $($pkg.DirectoryName)"
+          $pkg = Get-ChildItem -Filter package.json -Recurse -File -Depth 6 | Where-Object { $_.FullName -notmatch '\\node_modules\\' } | Select-Object -First 1
+          if (-not $pkg) { throw "package.json not found" }
+          "APP_DIR=$($pkg.DirectoryName)" | Out-File -Append -FilePath $env:GITHUB_ENV
+          Write-Host "APP_DIR=$($pkg.DirectoryName)"
 
-      - name: Show workspace tree (brief)
-        shell: pwsh
-        run: |
-          "CWD = $(Get-Location)" | Tee-Object -FilePath logs/00-cwd.txt
-          Get-ChildItem -Recurse -Force | Select-Object FullName, Length |
-            Format-Table -AutoSize | Out-String | Tee-Object -FilePath logs/01-tree.txt
-          "APP_DIR = $env:APP_DIR" | Tee-Object -FilePath logs/01a-appdir.txt
-
-      # Node
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Ensure package.json exists in APP_DIR
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          if (-not (Test-Path "package.json")) { throw "package.json not found in APP_DIR ($env:APP_DIR)" }
-          Get-Content package.json | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/04-package.before.txt
-
-      # 覆寫 build：app 不含 python；把整個 python 丟到 resources/python
-      - name: Overwrite package.json build config (put full python under resources)
+      - name: Patch package.json build
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
           $pkg = Get-Content package.json -Raw | ConvertFrom-Json
           $pkg.build = @{
-            appId           = "com.evi.brush.desktop";
-            productName     = "EVI Brush Desktop";
-            directories     = @{ output = "dist" };
-
-            files           = @(
-              "**/*",
-              "!python/**",   # ← app 區域排除 python
-              "!logs/**","!.github/**","!**/*.log","!**/*.md"
-            );
-
-            extraResources  = @(
-              @{ from = "python"; to = "python"; filter = @("**/*") }  # ← 整包含 venv/models
-            );
-
-            asar            = $false;   # debug 易檢查；穩定後可改回 true
+            appId       = "com.evi.brush.desktop";
+            productName = "EVI Brush Desktop";
+            directories = @{ output = "dist" };
+            files = @("**/*","!logs/**","!.github/**","!**/*.log","!**/*.md","!node_modules/*/.cache/**");
+            extraResources = @(@{from="python"; to="python"; filter=@("**/*")});
+            asar = $false;
             win  = @{ icon="build/icon.ico"; target=@("nsis") };
             nsis = @{
-              oneClick = $true; perMachine = $false;
-              allowToChangeInstallationDirectory = $false;
-              createDesktopShortcut = $true; createStartMenuShortcut = $true;
-              shortcutName = "EVI Brush Desktop"; runAfterFinish = $true;
-              uninstallDisplayName = "EVI Brush Desktop"
+              oneClick=$true; perMachine=$false;
+              allowToChangeInstallationDirectory=$false;
+              createDesktopShortcut=$true; createStartMenuShortcut=$true;
+              shortcutName="EVI Brush Desktop"; runAfterFinish=$true
             };
-            publish = @(@{ provider = "github" })
+            publish=@(@{provider="github"})
           }
-          ($pkg | ConvertTo-Json -Depth 100) | Set-Content package.json -Encoding UTF8
-          Get-Content package.json | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/04-package.after.txt | Out-Null
+          ($pkg|ConvertTo-Json -Depth 100)|Set-Content package.json -Encoding UTF8
 
-      - name: Install Node deps (lockfile-aware, verbose)
+      # 下載可攜 Python（PBS）到 python/pbs
+      - name: Bundle portable Python (PBS)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          if (Test-Path "package-lock.json") {
-            npm ci --loglevel verbose *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/05-npm-install.log
-          } else {
-            npm install --legacy-peer-deps --loglevel verbose *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/05-npm-install.log
-          }
+          $url = "https://github.com/indygreg/python-build-standalone/releases/download/20240713/cpython-3.10.14+20240713-x86_64-pc-windows-msvc-shared-pgo-full.zip"
+          $zip = "pbs.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "python\pbs-extract" -Force
+          $py = Get-ChildItem "python\pbs-extract" -Recurse -Filter python.exe | Select-Object -First 1
+          if (-not $py) { throw "pbs python.exe not found" }
+          New-Item -ItemType Directory -Force -Path "python\pbs" | Out-Null
+          Copy-Item $py.Directory.FullName\* -Destination "python\pbs" -Recurse -Force
+          Remove-Item $zip -Force
+          Write-Host "PBS ready."
 
-      - name: Ensure electron-builder available
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: npx --yes electron-builder --version *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/06-electron-builder-version.txt
-
-      # Python
-      - name: Setup Python
+      # 用 CI 的 Python 3.10 預先把 requirements 做成 wheels（離線可用）
+      - name: Setup Python (for wheels/model only)
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
 
-      # 先吃 venv 快取（成功時可省掉整個 pip 安裝時間）
-      - name: Cache Python venv
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.APP_DIR }}/python/venv
-          key: venv-${{ runner.os }}-py310-${{ hashFiles('**/python/requirements.txt') }}
-          restore-keys: |
-            venv-${{ runner.os }}-py310-
-
-      - name: Prepare venv & install Python deps (with hf_transfer)
+      - name: Build wheels for offline install
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          if (-not (Test-Path 'python/venv/Scripts/python.exe')) {
-            python -m venv python/venv
+          $req = if (Test-Path "python/requirements.txt") { "python/requirements.txt" } elseif (Test-Path "python/requirements") { "python/requirements" } else { "" }
+          if ($req -ne "") {
+            python -m pip install --upgrade pip wheel
+            python -m pip wheel -r $req -w python/wheels
+          } else {
+            Write-Host "No requirements file — skip wheels."
           }
-          python/venv/Scripts/python -m pip install --upgrade pip *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/07-pip-upgrade.log
-          if (Test-Path 'python/requirements.txt') {
-            python/venv/Scripts/pip install -r python/requirements.txt *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/08-pip-req.log
-          }
-          python/venv/Scripts/pip install huggingface_hub hf_transfer *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/09-pip-hf.log
 
-      # 是否打包模型
+      # 是否要把模型打包進去
       - name: Decide include model
         id: model
         shell: pwsh
         run: |
-          $manual = "${{ github.event.inputs.include_model }}"
-          $include = ($manual -eq "true")
-          "INCLUDE_MODEL=$include" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "INCLUDE_MODEL = $include"
+          $v = "${{ github.event.inputs.include_model }}"
+          if ($v -eq "") { $v = "true" }
+          "INCLUDE_MODEL=$v" | Out-File -Append -FilePath $env:GITHUB_ENV
+          Write-Host "INCLUDE_MODEL=$v"
 
-      # 模型快取（一次下載後，多次重用）
-      - name: Cache SDXL-Turbo
-        if: env.INCLUDE_MODEL == 'True'
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.APP_DIR }}/python/models/sd-turbo
-          key: sdxl-turbo-v1
-          restore-keys: |
-            sdxl-turbo-
-
-      - name: Download SDXL-Turbo model (hf_transfer accel)
-        if: env.INCLUDE_MODEL == 'True'
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: >
-          $env:HF_HUB_ENABLE_HF_TRANSFER="1";
-          python/venv/Scripts/python -c
-          "from huggingface_hub import snapshot_download;
-          from pathlib import Path;
-          target=Path('python/models/sd-turbo'); target.mkdir(parents=True, exist_ok=True);
-          snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False);
-          print('Model downloaded to:', target)" *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/10-model-download.log
-
-      # 只做 parser 檢查（不執行）
-      - name: Syntax-check main.js
+      - name: Download SDXL-Turbo model (into python/models)
+        if: env.INCLUDE_MODEL == 'true'
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          if (-not (Test-Path "main.js")) { throw "main.js not found in APP_DIR" }
-          node --check main.js
+          python -m pip install huggingface_hub hf_transfer
+          $env:HF_HUB_ENABLE_HF_TRANSFER="1"
+          python - << 'PY'
+from huggingface_hub import snapshot_download
+from pathlib import Path
+target = Path('python/models/sd-turbo'); target.mkdir(parents=True, exist_ok=True)
+snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False)
+print('model at', target)
+PY
 
-      - name: Ensure icon exists in APP_DIR/build
-        shell: pwsh
-        run: |
-          $src = Join-Path $env:GITHUB_WORKSPACE 'build/icon.ico'
-          $dstDir = Join-Path $env:APP_DIR 'build'
-          $dst = Join-Path $dstDir 'icon.ico'
-          if (Test-Path $src) { New-Item -ItemType Directory -Force -Path $dstDir | Out-Null; Copy-Item $src $dst -Force }
-
-      - name: Build Windows installer (succeed if artifacts exist)
+      - name: Build (succeed if artifacts exist)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          $env:DEBUG = "electron-builder"
-          npx electron-builder --win --publish never --x64 *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/11-electron-builder.log
-          $code = $LASTEXITCODE
+          $env:DEBUG="electron-builder"
+          npx electron-builder --win --x64 --publish never *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/eb.log
           $has = Get-ChildItem dist -Include *.exe,*.msi,*.zip,*.7z -Recurse -ErrorAction SilentlyContinue
-          if ($code -ne 0) {
-            if ($has) { Write-Warning "builder returned $code but installers exist → continue."; exit 0 }
-            else { Write-Error "builder failed with $code and no installers were produced."; exit $code }
-          }
+          if (-not $has) { throw "No installers produced." }
 
-      # Artifacts
-      - name: Upload CI logs
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows
+          path: ${{ env.APP_DIR }}/dist/*
+
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ci-logs
           path: logs/**
-          if-no-files-found: warn
-
-      - name: Upload installer (if any)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: installer-windows
-          path: |
-            ${{ env.APP_DIR }}/dist/*.exe
-            ${{ env.APP_DIR }}/dist/*.msi
-            ${{ env.APP_DIR }}/dist/*.zip
-            ${{ env.APP_DIR }}/dist/*.7z
-          if-no-files-found: warn
-
-      - name: Upload win-unpacked
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: win-unpacked
-          path: ${{ env.APP_DIR }}/dist/win-unpacked/**
-          if-no-files-found: warn
-
-      - name: Upload app folder (debug, asar:false)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-folder
-          path: ${{ env.APP_DIR }}/dist/win-unpacked/resources/app/**
-          if-no-files-found: warn
