@@ -9,76 +9,55 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      APP_DIR: ${{ github.workspace }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 先安裝 Node，不啟用 cache（避免沒有 lock 檔時失敗）
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
 
-      # 只有存在 lock 檔才啟用 npm cache
       - name: Enable npm cache if lockfile exists
-        if: ${{ hashFiles('**/package-lock.json', '**/yarn.lock', '**/npm-shrinkwrap.json') != '' }}
-        uses: actions/setup-node@v4
+        if: ${{ hashFiles('package-lock.json') != '' }}
+        uses: actions/cache@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
       - name: Install Node deps
         shell: pwsh
         run: |
-          if (Test-Path package-lock.json) { npm ci } else { npm i }
+          if (Test-Path 'package-lock.json') { npm ci } else { npm i }
 
-      - name: Prepare Python (venv + deps + PBS marker)
+      - name: Ensure pbs marker exists
         shell: pwsh
         run: |
-          $pyRoot = Join-Path $env:GITHUB_WORKSPACE 'resources/python'
-          New-Item -ItemType Directory -Force -Path $pyRoot | Out-Null
-          python -m venv (Join-Path $pyRoot 'venv')
-          $venvPy = Join-Path $pyRoot 'venv/Scripts/python.exe'
-          & $venvPy -m pip install --upgrade pip
-          if (Test-Path 'python/requirements.txt') { & $venvPy -m pip install -r 'python/requirements.txt' }
-          & $venvPy -m pip install huggingface_hub hf_transfer
-          Set-Content -Path (Join-Path $pyRoot 'pbs') -Value 'ok' -Encoding ascii
-
-      - name: Download SDXL-Turbo model
-        shell: pwsh
-        run: |
-          $venvPy = Join-Path $env:GITHUB_WORKSPACE 'resources/python/venv/Scripts/python.exe'
-          $lines = @(
-            'from pathlib import Path'
-            'from huggingface_hub import snapshot_download'
-            't=Path(r"resources/python/models/sd-turbo")'
-            't.mkdir(parents=True, exist_ok=True)'
-            'snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=str(t), local_dir_use_symlinks=False)'
-            'print("Model at", t)'
-          )
-          $tmp = Join-Path $env:RUNNER_TEMP 'download_model.py'
-          Set-Content -Path $tmp -Value ($lines -join "`n") -Encoding UTF8
-          & $venvPy $tmp | Tee-Object -FilePath "$env:GITHUB_WORKSPACE/eb.log" -Append
+          New-Item -ItemType Directory -Force -Path "python" | Out-Null
+          Set-Content -Path "python/pbs" -Value "ok" -Encoding ascii
 
       - name: Build (no publish)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          npx electron-builder --win --x64 --publish never *> "$env:GITHUB_WORKSPACE/eb.log"
+          npx electron-builder --win --x64 --publish=never *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\eb.log"
 
       - name: Upload installers
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: installer-windows
-          path: |
-            dist/*.exe
-            dist/*.zip
-          if-no-files-found: warn
+          path: dist/*
 
       - name: Upload logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
-          path: eb.log
-          if-no-files-found: ignore
+          path: |
+            eb.log
+            **\*.log
