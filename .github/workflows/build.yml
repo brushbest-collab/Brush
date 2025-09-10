@@ -3,10 +3,15 @@ name: Build Desktop App (Win, no publish)
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build-windows:
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      APP_DIR: ${{ github.workspace }}
 
     steps:
       - name: Checkout
@@ -17,30 +22,61 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Node deps
+      - name: Install Node dependencies
         shell: pwsh
         run: |
-          npm i
+          if (Test-Path package-lock.json) { npm ci } else { npm i }
 
-      - name: Ensure pbs marker & folders (optional)
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Ensure pbs marker & model dirs
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "logs" | Out-Null
-          New-Item -ItemType Directory -Force -Path "python\models\sd-turbo" | Out-Null
-          New-Item -ItemType File -Force -Path "python\pbs" | Out-Null
+          $pyDir  = Join-Path $env:APP_DIR 'python'
+          $pbsDir = Join-Path $pyDir 'pbs'
+          $mdlDir = Join-Path $pyDir 'models\sd-turbo'
+          [System.IO.Directory]::CreateDirectory($pyDir)  | Out-Null
+          [System.IO.Directory]::CreateDirectory($pbsDir) | Out-Null
+          [System.IO.Directory]::CreateDirectory($mdlDir) | Out-Null
+          Set-Content -Path (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii
+
+      - name: Prepare Python venv (optional)
+        shell: pwsh
+        run: |
+          python -m venv "$env:APP_DIR\python\venv"
+          $venvPy = Join-Path $env:APP_DIR 'python\venv\Scripts\python.exe'
+          & $venvPy -m pip install --upgrade pip wheel
+          if (Test-Path "$env:APP_DIR\python\requirements.txt") {
+            & $venvPy -m pip install -r "$env:APP_DIR\python\requirements.txt"
+          }
+          & $venvPy -m pip install huggingface_hub hf_transfer
+
+      - name: Download SDXL-Turbo model
+        shell: pwsh
+        env:
+          HF_HUB_ENABLE_HF_TRANSFER: '1'
+        run: |
+          $s = @'
+          from huggingface_hub import snapshot_download
+          from pathlib import Path
+          p = Path("python/models/sd-turbo")
+          p.mkdir(parents=True, exist_ok=True)
+          snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=str(p), local_dir_use_symlinks=False)
+          print("Model downloaded to", p)
+          '@
+          $tf = Join-Path $env:RUNNER_TEMP "dl_model.py"
+          $s | Set-Content -Path $tf -Encoding UTF8
+          $venvPy = Join-Path $env:APP_DIR 'python\venv\Scripts\python.exe'
+          if (Test-Path $venvPy) { & $venvPy $tf } else { python $tf }
 
       - name: Build (no publish)
         shell: pwsh
-        env:
-          DEBUG: "electron-builder"
         run: |
-          npx electron-builder --win --x64 --publish never 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\eb.log"
-
-      - name: Upload logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: logs/*.log
+          $ErrorActionPreference = "Stop"
+          npx electron-builder --win --x64 --publish never *>&1 | Tee-Object -FilePath "$env:APP_DIR\eb.log"
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
@@ -51,3 +87,11 @@ jobs:
             dist/*.msi
             dist/*.zip
             dist/*.7z
+          if-no-files-found: warn
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: eb.log
+          if-no-files-found: warn
