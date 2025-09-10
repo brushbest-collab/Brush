@@ -2,6 +2,11 @@ name: Release (Win + model, GitHub Releases)
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.2.3; 留空則自動產生)"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -9,7 +14,9 @@ permissions:
 jobs:
   release-windows:
     runs-on: windows-latest
+    timeout-minutes: 120
     env:
+      APP_DIR: ${{ github.workspace }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
@@ -19,57 +26,54 @@ jobs:
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-
-      - name: Enable npm cache if lockfile exists
-        if: ${{ hashFiles('**/package-lock.json', '**/yarn.lock', '**/npm-shrinkwrap.json') != '' }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: 20
 
       - name: Install Node deps
         shell: pwsh
         run: |
-          if (Test-Path package-lock.json) { npm ci } else { npm i }
+          if (Test-Path 'package-lock.json') { npm ci } else { npm i }
 
-      - name: Prepare Python (venv + deps + PBS marker)
+      - name: Ensure pbs marker exists
         shell: pwsh
         run: |
-          $pyRoot = Join-Path $env:GITHUB_WORKSPACE 'resources/python'
-          New-Item -ItemType Directory -Force -Path $pyRoot | Out-Null
-          python -m venv (Join-Path $pyRoot 'venv')
-          $venvPy = Join-Path $pyRoot 'venv/Scripts/python.exe'
-          & $venvPy -m pip install --upgrade pip
-          if (Test-Path 'python/requirements.txt') { & $venvPy -m pip install -r 'python/requirements.txt' }
-          & $venvPy -m pip install huggingface_hub hf_transfer
-          Set-Content -Path (Join-Path $pyRoot 'pbs') -Value 'ok' -Encoding ascii
+          New-Item -ItemType Directory -Force -Path "python\models\sd-turbo" | Out-Null
+          Set-Content -Path "python/pbs" -Value "ok" -Encoding ascii
 
       - name: Download SDXL-Turbo model
         shell: pwsh
         run: |
-          $venvPy = Join-Path $env:GITHUB_WORKSPACE 'resources/python/venv/Scripts/python.exe'
-          $lines = @(
-            'from pathlib import Path'
-            'from huggingface_hub import snapshot_download'
-            't=Path(r"resources/python/models/sd-turbo")'
-            't.mkdir(parents=True, exist_ok=True)'
-            'snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=str(t), local_dir_use_symlinks=False)'
-            'print("Model at", t)'
-          )
-          $tmp = Join-Path $env:RUNNER_TEMP 'download_model.py'
-          Set-Content -Path $tmp -Value ($lines -join "`n") -Encoding UTF8
-          & $venvPy $tmp | Tee-Object -FilePath "$env:GITHUB_WORKSPACE/eb.log" -Append
+          python -m pip install -U pip huggingface_hub hf_transfer
+          python - << 'PY'
+          import os
+          from huggingface_hub import snapshot_download
+          os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1'
+          target = os.path.join('python','models','sd-turbo')
+          os.makedirs(target, exist_ok=True)
+          snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=target, local_dir_use_symlinks=False)
+          print('Model saved to', target)
+          PY
 
-      - name: Build & publish to GitHub Releases
+      - name: Build installer
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          npx electron-builder --win --x64 --publish always *> "$env:GITHUB_WORKSPACE/eb.log"
+          npx electron-builder --win --x64 --publish=never *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\eb.log"
 
-      - name: Upload logs (for debugging)
-        uses: actions/upload-artifact@v4
+      - name: Create tag (optional)
+        if: ${{ inputs.tag != '' }}
+        shell: pwsh
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag "${{ inputs.tag }}"
+          git push origin "${{ inputs.tag }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: release-logs
-          path: eb.log
-          if-no-files-found: ignore
+          tag_name: ${{ inputs.tag != '' && inputs.tag || github.ref_name != 'refs/heads/main' && github.ref_name || format('v{0}', github.run_number) }}
+          make_latest: true
+          files: |
+            dist/*.exe
+            dist/*.zip
+            eb.log
