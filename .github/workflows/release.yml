@@ -1,12 +1,12 @@
-name: Release (Win + model, GitHub Releases)
+name: Release (Win, GitHub Releases)
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v1.2.3；留空則自動產生)'
+        description: "Release tag（例如 v1.2.3；留空則自動產生）"
         required: false
-        default: ''
+        default: ""
 
 permissions:
   contents: write
@@ -14,83 +14,65 @@ permissions:
 jobs:
   release-windows:
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
-      APP_DIR: ${{ github.workspace }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
-      - name: Install Node deps
-        run: npm ci
-
-      - name: Prepare Python (venv + deps + PBS marker)
+      - name: Install Node dependencies
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $app   = "$env:APP_DIR"
-          $pyDir = Join-Path $app 'python'
-          New-Item -ItemType Directory -Force -Path $pyDir | Out-Null
+          if (Test-Path package-lock.json) { npm ci } else { npm i }
 
-          python -m venv (Join-Path $pyDir 'venv')
-          $venvPy = Join-Path $pyDir 'venv\Scripts\python.exe'
-
-          & $venvPy -m pip install --upgrade pip wheel
-          if (Test-Path (Join-Path $app 'python\requirements.txt')) {
-            & $venvPy -m pip install -r (Join-Path $app 'python\requirements.txt')
+      - name: Ensure icon exists (optional)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path build\icon.ico)) {
+            New-Item -ItemType Directory -Path build -Force | Out-Null
+            (New-Object Net.WebClient).DownloadFile(
+              'https://raw.githubusercontent.com/electron/electron/main/docs/images/icons/win/icon.ico',
+              'build\icon.ico'
+            )
           }
-          & $venvPy -m pip install 'huggingface_hub[hf_transfer]'
 
-          New-Item -ItemType Directory -Force -Path (Join-Path $pyDir 'pbs') | Out-Null
-          Set-Content -Path (Join-Path $pyDir 'pbs\OK') -Value 'ok' -Encoding ASCII
-
-      - name: Download SDXL-Turbo model
+      - name: Build (no publish yet)
         shell: pwsh
+        env:
+          DEBUG: "electron-builder"
         run: |
-          $ErrorActionPreference = 'Stop'
-          $pyDir  = Join-Path "$env:APP_DIR" 'python'
-          $venvPy = Join-Path $pyDir 'venv\Scripts\python.exe'
-          $code = @'
-          from huggingface_hub import snapshot_download
-          from pathlib import Path
-          target = Path(r"python/models/sd-turbo")
-          snapshot_download(repo_id="stabilityai/sdxl-turbo",
-                            local_dir=str(target),
-                            local_dir_use_symlinks=False)
-          print("model saved to", target)
-          '@
-          $tmp = Join-Path $env:RUNNER_TEMP 'dl_model.py'
-          Set-Content -Path $tmp -Value $code -Encoding UTF8
-          & $venvPy $tmp 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\model-download.txt"
+          npx electron-builder --win --x64 --publish never *> $env:GITHUB_WORKSPACE/eb.log
+          if (-not (Test-Path dist)) { throw "No installers produced." }
 
-      # （可選）建立標籤
       - name: Create tag (optional)
         if: ${{ inputs.tag != '' }}
         shell: pwsh
         run: |
           git config user.name  "github-actions"
           git config user.email "github-actions@github.com"
-          git tag  $env:INPUTS_TAG
-          git push origin $env:INPUTS_TAG
+          git tag ${{ inputs.tag }}
+          git push origin ${{ inputs.tag }}
 
-      - name: Build & publish to GitHub Releases
+      - name: Create GitHub Release
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          npx electron-builder --win --x64 --publish always 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\eb.log"
+          $tag = if ("${{ inputs.tag }}") { "${{ inputs.tag }}" } else { "v$(Get-Date -Format 'yyyy.MM.dd.HHmm')" }
+          gh release create $tag --notes "Automated Windows build" --title $tag
+          Get-ChildItem dist -Recurse -Include *.exe,*.msi,*.zip,*.7z |
+            ForEach-Object { gh release upload $tag $_.FullName --clobber }
 
       - name: Upload logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: release-logs
           path: |
             eb.log
-            logs/**
+            **\*.log
