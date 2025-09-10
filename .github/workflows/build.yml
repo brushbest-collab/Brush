@@ -18,16 +18,16 @@ jobs:
       NPM_CONFIG_AUDIT: "false"
 
     steps:
-      # 0) 取版控
+      # 0) Checkout
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 0.1) 建 log 資料夾
+      # 0.1) Logs dir
       - name: Create logs dir
         shell: pwsh
         run: New-Item -Type Directory -Force -Path logs | Out-Null
 
-      # 1) 找到含 package.json 的應用資料夾
+      # 1) Locate app dir
       - name: Locate app dir (package.json)
         id: locate
         shell: pwsh
@@ -63,7 +63,7 @@ jobs:
           npx --yes electron-builder --version `
             *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/05-electron-builder.txt
 
-      # 3) 準備 Python（build 時用）
+      # 3) Python venv & deps
       - name: Setup Python (build-time)
         uses: actions/setup-python@v5
         with:
@@ -86,11 +86,10 @@ jobs:
               *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/07-pip-req.log
           }
 
-          # 模型下載需要的套件
           & $venvPy -m pip install huggingface_hub hf_transfer `
             *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/08-pip-hf.log
 
-      # 4) 下載 SDXL-turbo 模型（改成單行 python -c，避免 YAML/Here-String 地獄）
+      # 4) Download SDXL-turbo model（單行 python -c，避免 YAML 縮排/Here-String 問題）
       - name: Download SDXL-turbo model
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
@@ -99,43 +98,46 @@ jobs:
           & $venvPy -c "import os, pathlib; from huggingface_hub import snapshot_download; os.environ['HF_HUB_ENABLE_HF_TRANSFER']='1'; target=pathlib.Path('python/models/sd-turbo'); target.mkdir(parents=True, exist_ok=True); snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False); print('Model downloaded to', target)" `
             *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/09-model.log
 
-      # 5) 修補 package.json（打包設定）
-      - name: Patch package.json for build
+      # 5) 產生 electron-builder.yml（用這份取代 package.json 內 build）
+      - name: Write electron-builder.yml
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          function Ensure-Prop { param($obj,$name,$default)
-            if (-not ($obj.PSObject.Properties.Name -contains $name)) {
-              $obj | Add-Member -NotePropertyName $name -NotePropertyValue $default
-            }
-          }
-          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
-          Ensure-Prop $pkg 'build' @{}
-          $b = $pkg.build
+          @'
+appId: com.evi.brush.desktop
+productName: EVI Brush Desktop
 
-          Ensure-Prop $b 'directories' @{}
-          $b.directories.output = 'dist'
+directories:
+  output: dist
 
-          # 除了 venv / models 以外全部打包；模型用 extraResources 帶到 resources 之下
-          $b.files = @('**/*','!python/venv/**','!python/models/**')
+files:
+  - "**/*"
+  - "!python/venv/**"
+  - "!python/models/**"
 
-          $b.asar = $true
-          $b.asarUnpack = @('python/**')
-          $b.extraResources = @(@{ from='python/models'; to='resources/python/models'; filter=@('**/*') })
+asar: true
+asarUnpack:
+  - "python/**"
 
-          Ensure-Prop $b 'win' @{}
-          $b.win.icon   = 'build/icon.ico'
-          $b.win.target = @('nsis')
+extraResources:
+  - from: python/models
+    to: resources/python/models
+    filter:
+      - "**/*"
 
-          Ensure-Prop $b 'nsis' @{}
-          $b.nsis.oneClick = $false
-          $b.nsis.perMachine = $false
-          $b.nsis.allowToChangeInstallationDirectory = $true
-          $b.nsis.createDesktopShortcut = 'always'
-          $b.nsis.shortcutName = 'EVI Brush Desktop'
-          $b.nsis.uninstallDisplayName = 'EVI Brush Desktop'
+win:
+  target:
+    - nsis
+  icon: build/icon.ico
 
-          ($pkg | ConvertTo-Json -Depth 100) | Set-Content -Path package.json -Encoding UTF8
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  shortcutName: EVI Brush Desktop
+  uninstallDisplayName: EVI Brush Desktop
+'@ | Set-Content -Path "electron-builder.yml" -Encoding UTF8
 
       # 6) Build
       - name: Build with electron-builder
@@ -143,7 +145,7 @@ jobs:
         working-directory: ${{ env.APP_DIR }}
         run: |
           $env:DEBUG = 'electron-builder'
-          npx electron-builder --win --x64 --publish never `
+          npx electron-builder --config electron-builder.yml --win --x64 --publish never `
             *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/11-eb.log
 
       # 7) 驗證是否有產物
