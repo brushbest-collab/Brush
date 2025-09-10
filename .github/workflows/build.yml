@@ -1,4 +1,4 @@
-name: Build Desktop (Win, no publish)
+name: Build Desktop App (Win, no publish)
 
 on:
   workflow_dispatch:
@@ -9,82 +9,55 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 120
-    env:
-      APP_DIR: ${{ github.workspace }}
+    timeout-minutes: 180
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      # 不使用 cache，避免要求有 lockfile（package-lock / yarn.lock）
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
 
-      - name: Install Node deps
-        run: npm ci
-
-      # 建 venv + 安裝相依 + 建立 PBS 標記
-      - name: Prepare Python (venv + deps + PBS marker)
+      - name: Install Node dependencies
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $app   = "$env:APP_DIR"
-          $pyDir = Join-Path $app 'python'
-          New-Item -ItemType Directory -Force -Path $pyDir | Out-Null
+          if (Test-Path package-lock.json) { npm ci } else { npm i }
 
-          python -m venv (Join-Path $pyDir 'venv')
-          $venvPy = Join-Path $pyDir 'venv\Scripts\python.exe'
-
-          & $venvPy -m pip install --upgrade pip wheel
-          if (Test-Path (Join-Path $app 'python\requirements.txt')) {
-            & $venvPy -m pip install -r (Join-Path $app 'python\requirements.txt')
+      # 可選：確保 icon 存在（若你已把 build/icon.ico commit 進 repo，可保留或刪除此步）
+      - name: Ensure icon exists (optional)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path build\icon.ico)) {
+            New-Item -ItemType Directory -Path build -Force | Out-Null
+            (New-Object Net.WebClient).DownloadFile(
+              'https://raw.githubusercontent.com/electron/electron/main/docs/images/icons/win/icon.ico',
+              'build\icon.ico'
+            )
           }
-          & $venvPy -m pip install 'huggingface_hub[hf_transfer]'
-
-          # 讓 app 能判斷「已內建 Python」
-          New-Item -ItemType Directory -Force -Path (Join-Path $pyDir 'pbs') | Out-Null
-          Set-Content -Path (Join-Path $pyDir 'pbs\OK') -Value 'ok' -Encoding ASCII
-
-      # 下載模型到 python/models/sd-turbo
-      - name: Download SDXL-Turbo model
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $pyDir  = Join-Path "$env:APP_DIR" 'python'
-          $venvPy = Join-Path $pyDir 'venv\Scripts\python.exe'
-          $code = @'
-          from huggingface_hub import snapshot_download
-          from pathlib import Path
-          target = Path(r"python/models/sd-turbo")
-          snapshot_download(repo_id="stabilityai/sdxl-turbo",
-                            local_dir=str(target),
-                            local_dir_use_symlinks=False)
-          print("model saved to", target)
-          '@
-          $tmp = Join-Path $env:RUNNER_TEMP 'dl_model.py'
-          Set-Content -Path $tmp -Value $code -Encoding UTF8
-          & $venvPy $tmp 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\model-download.txt"
 
       - name: Build (no publish)
         shell: pwsh
+        env:
+          DEBUG: "electron-builder"
         run: |
-          $ErrorActionPreference = 'Stop'
-          npx electron-builder --win --x64 --publish never 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\eb.log"
+          npx electron-builder --win --x64 --publish never *> $env:GITHUB_WORKSPACE/eb.log
+          if (-not (Test-Path dist)) { throw "No installers produced." }
+          Get-ChildItem dist -Recurse | % { Write-Host "artifact $($_.FullName)" }
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
           name: installer-windows
-          path: dist/*.{exe,msi,zip,7z}
-          if-no-files-found: ignore
+          path: dist/**
 
       - name: Upload logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
           path: |
             eb.log
-            logs/**
+            **\*.log
