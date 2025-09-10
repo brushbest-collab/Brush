@@ -1,4 +1,4 @@
-name: Build Desktop App (Win, embed Python + model, no publish)
+name: Build Desktop App (Win, no publish)
 
 on:
   workflow_dispatch:
@@ -17,97 +17,46 @@ jobs:
       NPM_CONFIG_AUDIT: "false"
 
     steps:
-      # 0) Checkout & 日誌資料夾
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create logs dir
-        shell: pwsh
-        run: New-Item -ItemType Directory -Force -Path logs | Out-Null
-
-      # 1) 找出含 package.json 的應用資料夾
-      - name: Locate app dir
+      - name: Locate app directory (package.json)
         id: locate
         shell: pwsh
         run: |
-          $pkg = Get-ChildItem -Path . -Filter package.json -Recurse -File -Depth 6 `
-                 | Where-Object { $_.FullName -notmatch '\\node_modules\\' } `
-                 | Select-Object -First 1
-          if (-not $pkg) { throw "package.json not found in repo." }
+          $pkg = Get-ChildItem -Path . -Filter package.json -Recurse -File -Depth 6 |
+                 Where-Object { $_.FullName -notmatch '\\node_modules\\' } |
+                 Select-Object -First 1
+          if (-not $pkg) { throw "package.json not found" }
           "APP_DIR=$($pkg.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "AppDir: $($pkg.DirectoryName)" | Tee-Object -FilePath logs/00-appdir.txt
+          Write-Host "APP_DIR = $($pkg.DirectoryName)"
 
-      # 2) Node
+      - name: Show tree
+        shell: pwsh
+        run: |
+          "APP_DIR=$env:APP_DIR" | Tee-Object -FilePath logs_appdir.txt
+          Get-ChildItem -Recurse -Force | Select FullName,Length | Format-Table -AutoSize | Out-String |
+            Tee-Object -FilePath tree.txt
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Print Node/NPM versions
+      - name: Print Node/NPM
         shell: pwsh
         run: |
-          node -v | Tee-Object -FilePath logs/01-node.txt
-          npm -v  | Tee-Object -FilePath logs/02-npm.txt -Append
+          node -v
+          npm -v
 
-      - name: Install Node deps
+      - name: Ensure package.json exists
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          if (Test-Path "package-lock.json") {
-            npm ci --loglevel verbose *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/03-npm-install.log
-          } else {
-            npm install --legacy-peer-deps --loglevel verbose *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/03-npm-install.log
-          }
+          if (-not (Test-Path package.json)) { throw "package.json missing in APP_DIR ($env:APP_DIR)" }
 
-      - name: Ensure electron-builder
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: npx --yes electron-builder --version `
-             *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/04-electron-builder.txt
-
-      # 3) Python 3.10（用來建立與預熱 venv）
-      - name: Setup Python 3.10
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-          cache: "pip"
-
-      - name: Create venv & install Python deps (inside app/python/venv)
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          if (!(Test-Path "python")) { New-Item -ItemType Directory -Path "python" | Out-Null }
-          python -m venv python/venv
-          & python/venv/Scripts/python.exe -m pip install --upgrade pip `
-            *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/05-pip-upgrade.log
-          if (Test-Path "python/requirements.txt") {
-            & python/venv/Scripts/pip.exe install -r python/requirements.txt `
-              *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/06-pip-requirements.log
-          }
-
-      # 4) 下載模型到 app/python/models/sd-turbo  (可視需要保留/刪除)
-      - name: Download SDXL-Turbo model
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          & python/venv/Scripts/pip.exe install "huggingface_hub>=0.23" `
-            *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/07-pip-hf.log
-          $py = "python/venv/Scripts/python.exe"
-          $code = @"
-from huggingface_hub import snapshot_download
-from pathlib import Path
-target = Path('python/models/sd-turbo')
-target.mkdir(parents=True, exist_ok=True)
-snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target),
-                  local_dir_use_symlinks=False)
-print('Model saved to:', target)
-"@
-          $code | Set-Content -Path "$env:GITHUB_WORKSPACE/model_download.py" -Encoding UTF8
-          & $py "$env:GITHUB_WORKSPACE/model_download.py" `
-            *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/08-model-download.log
-
-      # 5) Patch package.json：內嵌 python/venv & models，設定 icon，修正 nsis
-      - name: Patch package.json (embed python/venv + models, set icon)
+      # ---- 修補 package.json：icon & build 設定（合法欄位，避免 schema 錯誤）----
+      - name: Patch package.json build config (icon, nsis, asar, resources)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
@@ -116,85 +65,116 @@ print('Model saved to:', target)
               $obj | Add-Member -NotePropertyName $name -NotePropertyValue $default
             }
           }
-
-          if (!(Test-Path "build/icon.ico")) {
-            throw "Icon 'build/icon.ico' not found. Please put a .ico (256x256) there."
-          }
-
           $pkg = Get-Content package.json -Raw | ConvertFrom-Json
-          Ensure-Prop $pkg 'name' 'evi-brush-desktop'
-          Ensure-Prop $pkg 'productName' 'EVI Brush Desktop'
-          Ensure-Prop $pkg 'build' (@{})
+
+          Ensure-Prop -obj $pkg -name 'build' -default (@{})
           $b = $pkg.build
 
-          # 輸出資料夾
-          Ensure-Prop $b 'directories' (@{})
+          # directories
+          Ensure-Prop -obj $b -name 'directories' -default (@{})
           $b.directories.output = "dist"
 
-          # files：包含全部，但排除 repo 垃圾；不要排除 python/venv / python/models
-          $b.files = @(
-            "**/*",
-            "!**/*.log",
-            "!**/*.md",
-            "!node_modules/.cache/**",
-            "!logs/**",
-            "!.git/**", "!.github/**"
-          )
+          # files：排除 venv 與 models
+          $b.files = @("**/*", "!python/venv/**", "!python/models/**")
 
-          # asar 與解包設定：python/** 不進 asar
-          $b.asar = $true
-          $b.asarUnpack = @("python/**")
-
-          # extraResources：把 venv 與 models 放到 resources/python 下（符合 main.js）
+          # extraResources：把模型整包帶進 resources/python/models
           $b.extraResources = @(
-            @{ from = "python/venv";   to = "resources/python/venv";   filter = @("**/*") },
             @{ from = "python/models"; to = "resources/python/models"; filter = @("**/*") }
           )
 
-          # Windows 打包
-          Ensure-Prop $b 'win' (@{})
-          $b.win.icon   = "build/icon.ico"
+          # asar & asarUnpack
+          $b.asar = $true
+          $b.asarUnpack = @("python/**")
+
+          # Windows 目標與 icon（很重要：icon 要放在 build/icon.ico）
+          Ensure-Prop -obj $b -name 'win' -default (@{})
           $b.win.target = @("nsis")
+          $b.win.icon   = "build/icon.ico"
 
-          # NSIS 正確位置的屬性（shortcutName 要在 nsis）
-          Ensure-Prop $b 'nsis' (@{})
+          # NSIS 合法欄位（shortcutName 要放在 nsis，不是 win）
+          Ensure-Prop -obj $b -name 'nsis' -default (@{})
           $b.nsis.oneClick = $true
-          $b.nsis.createDesktopShortcut = "always"
+          $b.nsis.perMachine = $false
+          $b.nsis.createDesktopShortcut = $true
           $b.nsis.shortcutName = "EVI Brush Desktop"
-          $b.nsis.runAfterFinish = $true
+          $b.nsis.uninstallDisplayName = "EVI Brush Desktop"
 
-          #（保留 publish 設定給 Release 用；這個 workflow 用 CLI 加 --publish never）
-          Ensure-Prop $b 'publish' (@{ provider = "github" })
+          # 基本資訊避免 schema 抱怨
+          Ensure-Prop -obj $b -name 'appId' -default 'com.evi.brush.desktop'
 
-          # 寫回
           ($pkg | ConvertTo-Json -Depth 100) | Set-Content -Path package.json -Encoding UTF8
-          Get-Content package.json | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/09-package.json.after.txt | Out-Null
 
-      # 6) Build
+      - name: Install Node deps
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          if (Test-Path package-lock.json) { npm ci } else { npm i --legacy-peer-deps }
+
+      - name: Ensure electron-builder
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: npx --yes electron-builder --version
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Create venv & install Python deps
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          $pyRoot = Join-Path $env:APP_DIR 'resources/python'
+          New-Item -ItemType Directory -Force -Path $pyRoot | Out-Null
+          python -m venv (Join-Path $pyRoot 'venv')
+          $venvPy = Join-Path $pyRoot 'venv/Scripts/python.exe'
+          & $venvPy -m pip install --upgrade pip wheel
+          if (Test-Path 'python/requirements.txt') {
+            & $venvPy -m pip install -r python/requirements.txt
+          }
+          & $venvPy -m pip install huggingface_hub hf_transfer
+
+      - name: Download SDXL-Turbo model (to python/models)
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          HF_HUB_ENABLE_HF_TRANSFER: "1"
+        run: |
+          $venvPy = Join-Path $env:APP_DIR 'resources/python/venv/Scripts/python.exe'
+          $code = @'
+from pathlib import Path
+from huggingface_hub import snapshot_download
+p = Path("python/models/sd-turbo"); p.mkdir(parents=True, exist_ok=True)
+snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=str(p), local_dir_use_symlinks=False)
+print("Model saved to:", p)
+'@
+          $tmp = Join-Path $env:RUNNER_TEMP 'download_model.py'
+          Set-Content -Path $tmp -Value $code -Encoding UTF8
+          & $venvPy $tmp *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE/model-download.log"
+
       - name: Build (no publish)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          $env:DEBUG="electron-builder"
-          npx electron-builder --win --x64 --publish never `
-            *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/10-build.log
+          $ErrorActionPreference = 'Stop'
+          $env:DEBUG = "electron-builder*"
+          npx electron-builder --win --x64 --publish never *>&1 |
+            Tee-Object -FilePath "$env:GITHUB_WORKSPACE/eb.log"
+          $has = Get-ChildItem dist -Include *.exe,*.msi,*.zip,*.7z -Recurse
+          if (-not $has) { throw "No installers produced." }
 
-      # 7) 上傳產物 & 日誌
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
           name: installer-windows
-          path: |
-            ${{ env.APP_DIR }}/dist/*.exe
-            ${{ env.APP_DIR }}/dist/*.msi
-            ${{ env.APP_DIR }}/dist/*.zip
-            ${{ env.APP_DIR }}/dist/*.7z
-          if-no-files-found: warn
+          path: ${{ env.APP_DIR }}/dist/*
 
       - name: Upload logs
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
-          path: logs/**
-          if-no-files-found: warn
+          path: |
+            eb.log
+            model-download.log
+            tree.txt
+            logs_appdir.txt
