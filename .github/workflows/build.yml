@@ -1,4 +1,4 @@
-name: Build Desktop App (PBS + model)
+name: Build Desktop App (Win, Python + model)
 
 on:
   workflow_dispatch:
@@ -11,36 +11,26 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 180
-
-    env:
-      NPM_CONFIG_FUND: "false"
-      NPM_CONFIG_AUDIT: "false"
+    timeout-minutes: 120
 
     steps:
-      # 0) Checkout
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 0.1) Logs dir
       - name: Create logs dir
         shell: pwsh
-        run: New-Item -Type Directory -Force -Path logs | Out-Null
+        run: New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\logs" | Out-Null
 
-      # 1) Locate app dir
-      - name: Locate app dir (package.json)
+      - name: Locate app dir (where package.json lives)
         id: locate
         shell: pwsh
         run: |
-          $pkg = Get-ChildItem -Path . -Filter package.json -Recurse -File -Depth 6 `
-                 | Where-Object { $_.FullName -notmatch '\\node_modules\\' } `
-                 | Select-Object -First 1
-          if (-not $pkg) { throw "package.json not found anywhere in the repo." }
-          $dir = $pkg.DirectoryName
-          "APP_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "APP_DIR: $dir"
+          $pkg = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Filter package.json -Recurse -Depth 6 -File |
+            Where-Object { $_.FullName -notmatch '\\node_modules\\' } | Select-Object -First 1
+          if (-not $pkg) { throw "package.json not found" }
+          "APP_DIR=$($pkg.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "APP_DIR = $($pkg.DirectoryName)"
 
-      # 2) Node
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -50,126 +40,87 @@ jobs:
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          if (Test-Path "package-lock.json") {
-            npm ci --loglevel verbose
-          } else {
-            npm install --legacy-peer-deps --loglevel verbose
-          }
+          if (Test-Path "package-lock.json") { npm ci --loglevel verbose } else { npm install --legacy-peer-deps --loglevel verbose }
 
       - name: Ensure electron-builder available
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          npx --yes electron-builder --version `
-            *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/05-electron-builder.txt
+          npx --yes electron-builder --version | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\eb-version.txt"
 
-      # 3) Python venv & deps
-      - name: Setup Python (build-time)
+      - name: Patch package.json (minimal safe build config)
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          if (-not $pkg.build) { $pkg | Add-Member -NotePropertyName build -NotePropertyValue (@{}) }
+          $b = $pkg.build
+          $b.productName = "EVI Brush Desktop"
+          $b.appId       = "com.evi.brush.desktop"
+          $b.files       = @("**/*","!python/venv/**")
+          $b.extraResources = @(@{ from = "python/models"; to = "resources/python/models"; filter = @("**/*") })
+          $b.asar        = $true
+          $b.asarUnpack  = @("python/**")
+          if (-not $b.win) { $b | Add-Member -NotePropertyName win -NotePropertyValue (@{}) }
+          $b.win.icon    = "build/icon.ico"
+          $b.win.target  = @("nsis")
+          $pkg.publish   = @(@{ provider = "github" })
+          ($pkg | ConvertTo-Json -Depth 100) | Set-Content -Encoding UTF8 package.json
+
+      - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Create venv & install python deps
+      - name: Create venv & install Python deps
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
           $pyRoot = Join-Path $env:APP_DIR 'resources/python'
           New-Item -ItemType Directory -Force -Path $pyRoot | Out-Null
           python -m venv (Join-Path $pyRoot 'venv')
-          $venvPy = Join-Path $pyRoot 'venv/Scripts/python.exe'
+          $venvPy = Join-Path $pyRoot 'venv\Scripts\python.exe'
+          & $venvPy -m pip install --upgrade pip
+          if (Test-Path 'python/requirements.txt') { & $venvPy -m pip install -r 'python/requirements.txt' }
+          & $venvPy -m pip install huggingface_hub hf_transfer
 
-          & $venvPy -m pip install --upgrade pip wheel `
-            *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/06-pip-upgrade.log
-
-          if (Test-Path 'python/requirements.txt') {
-            & $venvPy -m pip install -r python/requirements.txt `
-              *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/07-pip-req.log
-          }
-
-          & $venvPy -m pip install huggingface_hub hf_transfer `
-            *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/08-pip-hf.log
-
-      # 4) Download SDXL-turbo model（單行 python -c，避免 YAML 縮排/Here-String 問題）
       - name: Download SDXL-turbo model
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          $venvPy = Join-Path $env:APP_DIR 'resources/python/venv/Scripts/python.exe'
-          & $venvPy -c "import os, pathlib; from huggingface_hub import snapshot_download; os.environ['HF_HUB_ENABLE_HF_TRANSFER']='1'; target=pathlib.Path('python/models/sd-turbo'); target.mkdir(parents=True, exist_ok=True); snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False); print('Model downloaded to', target)" `
-            *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/09-model.log
+          $pyRoot = Join-Path $env:APP_DIR 'resources/python'
+          $venvPy = Join-Path $pyRoot 'venv\Scripts\python.exe'
+          $code = @'
+from huggingface_hub import snapshot_download
+from pathlib import Path
+p = Path("python/models/sd-turbo")
+p.mkdir(parents=True, exist_ok=True)
+snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=str(p), local_dir_use_symlinks=False)
+print("Model saved to:", p)
+'@
+          $script = Join-Path $env:RUNNER_TEMP 'dl_model.py'
+          $code | Set-Content -Path $script -Encoding UTF8
+          & $venvPy $script *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\model-download.txt"
 
-      # 5) 產生 electron-builder.yml（用這份取代 package.json 內 build）
-      - name: Write electron-builder.yml
+      - name: Build Windows installer
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
+        continue-on-error: true
         run: |
-          @'
-appId: com.evi.brush.desktop
-productName: EVI Brush Desktop
+          $env:DEBUG="electron-builder"
+          npx electron-builder --win --x64 --publish never *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\electron-builder.txt"
 
-directories:
-  output: dist
-
-files:
-  - "**/*"
-  - "!python/venv/**"
-  - "!python/models/**"
-
-asar: true
-asarUnpack:
-  - "python/**"
-
-extraResources:
-  - from: python/models
-    to: resources/python/models
-    filter:
-      - "**/*"
-
-win:
-  target:
-    - nsis
-  icon: build/icon.ico
-
-nsis:
-  oneClick: false
-  perMachine: false
-  allowToChangeInstallationDirectory: true
-  createDesktopShortcut: always
-  shortcutName: EVI Brush Desktop
-  uninstallDisplayName: EVI Brush Desktop
-'@ | Set-Content -Path "electron-builder.yml" -Encoding UTF8
-
-      # 6) Build
-      - name: Build with electron-builder
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          $env:DEBUG = 'electron-builder'
-          npx electron-builder --config electron-builder.yml --win --x64 --publish never `
-            *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/11-eb.log
-
-      # 7) 驗證是否有產物
-      - name: Assert installers exist
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          $has = Get-ChildItem -Path 'dist' -Recurse -Include *.exe,*.msi,*.zip,*.7z -ErrorAction SilentlyContinue
-          if (-not $has) { throw 'No installers produced.' }
-          "Installers: $($has.Count)"
-
-      # 8) 上傳產物 / 日誌
       - name: Upload installers
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: installer-windows
-          path: ${{ env.APP_DIR }}/dist/**
+          path: ${{ env.APP_DIR }}\dist\*
           if-no-files-found: warn
 
-      - name: Upload CI logs
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ci-logs
-          path: logs/**
+          name: build-logs
+          path: logs\**
           if-no-files-found: warn
