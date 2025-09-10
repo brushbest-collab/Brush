@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (例如 v1.2.3；留空則自動產生)"
+        description: "Release tag（例如 v1.0.0；留空就不打 tag）"
         required: false
         default: ""
 
@@ -14,7 +14,12 @@ permissions:
 jobs:
   release-windows:
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
+
+    env:
+      APP_DIR: ${{ github.workspace }}
+      VENV: ${{ github.workspace }}\resources\python\venv
+      PYEXE: ${{ github.workspace }}\resources\python\venv\Scripts\python.exe
 
     steps:
       - name: Checkout
@@ -25,80 +30,84 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Node deps
-        shell: pwsh
-        run: npm i
-
-      - name: Ensure folders and pbs marker
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path "logs" | Out-Null
-          New-Item -ItemType Directory -Force -Path "python\models\sd-turbo" | Out-Null
-          New-Item -ItemType File      -Force -Path "python\pbs" | Out-Null
-
       - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: '3.10'
 
-      - name: Install python deps and download SDXL-Turbo
+      - name: Install Node dependencies
+        shell: pwsh
+        run: |
+          if (Test-Path package-lock.json) { npm ci } else { npm i }
+
+      - name: Create venv & install Python deps
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pyRoot = Join-Path $env:APP_DIR 'resources/python'
+          New-Item -ItemType Directory -Force -Path $pyRoot | Out-Null
+          python -m venv $env:VENV
+          $venvPy = "$env:PYEXE"
+          & $venvPy -m pip install --upgrade pip wheel
+          if (Test-Path 'python/requirements.txt') {
+            & $venvPy -m pip install -r 'python/requirements.txt'
+          } else {
+            & $venvPy -m pip install huggingface_hub hf_transfer
+          }
+
+      - name: Ensure pbs marker exists
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path 'python/pbs' | Out-Null
+          Set-Content -Path 'python/pbs/ok' -Value 'ok' -Encoding ascii
+
+      - name: Download SDXL-Turbo model
         shell: pwsh
         env:
           HF_HUB_ENABLE_HF_TRANSFER: "1"
         run: |
           $ErrorActionPreference = 'Stop'
-          python -m pip install -U pip
-          python -m pip install huggingface_hub hf_transfer
-
-          $code = @'
+          New-Item -ItemType Directory -Force -Path 'python/models/sd-turbo' | Out-Null
+          $script = @'
 from huggingface_hub import snapshot_download
-from pathlib import Path
-target = Path("python/models/sd-turbo")
-target.mkdir(parents=True, exist_ok=True)
+import os
+dst = os.path.join("python","models","sd-turbo")
+os.makedirs(dst, exist_ok=True)
 snapshot_download(
     repo_id="stabilityai/sdxl-turbo",
-    local_dir=str(target),
+    local_dir=dst,
     local_dir_use_symlinks=False
 )
-print("Model downloaded to:", target)
+print("Model downloaded to:", dst)
 '@
+          $fn = "$env:RUNNER_TEMP\download_model.py"
+          $script | Set-Content -Encoding UTF8 $fn
+          & "$env:PYEXE" $fn *>> "$env:GITHUB_WORKSPACE\logs\model-download.log"
 
-          $script = Join-Path $env:RUNNER_TEMP 'download_model.py'
-          Set-Content -Path $script -Value $code -Encoding UTF8
-          python $script 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\model-download.log"
-
-      - name: Build app (no publish)
+      - name: Build & publish to GitHub Releases
         shell: pwsh
         env:
-          DEBUG: "electron-builder"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          npx electron-builder --win --x64 --publish never 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\eb.log"
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path 'logs' | Out-Null
+          npx electron-builder --win --x64 --publish always *>> "$env:GITHUB_WORKSPACE\logs\eb.log"
 
-      - name: Upload logs
+      - name: Create tag (optional)
+        if: ${{ inputs.tag != '' }}
+        shell: pwsh
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          git config user.email "github-actions@github.com"
+          git config user.name  "github-actions"
+          git tag $env:INPUT_TAG
+          git push origin $env:INPUT_TAG
+
+      - name: Upload logs & artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs
-          path: logs/*.log
-
-      - name: Upload installers
-        uses: actions/upload-artifact@v4
-        with:
-          name: installer-windows
+          name: release-logs
           path: |
-            dist/*.exe
-            dist/*.msi
-            dist/*.zip
-            dist/*.7z
-
-      - name: Create / Update GitHub Release
-        uses: ncipollo/release-action@v1
-        with:
-          tag: ${{ github.event.inputs.tag != '' && github.event.inputs.tag || format('v{0}', github.run_number) }}
-          name: EVI Brush Desktop ${{ github.event.inputs.tag != '' && github.event.inputs.tag || format('build #{0}', github.run_number) }}
-          body: |
-            Automated release by GitHub Actions.
-            - Model: SDXL-Turbo included (python/models/sd-turbo)
-            - PBS marker: python/pbs
-          artifacts: "dist/*.exe,dist/*.msi,dist/*.zip,dist/*.7z"
-          allowUpdates: true
-          replacesArtifacts: true
+            logs/**
+            dist/**
