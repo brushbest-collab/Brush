@@ -1,27 +1,29 @@
-name: Build Desktop App (Win, Python + model)
+name: Release (Win, publish to GitHub)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main, master ]
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v1.2.3) — 留空則不建立 tag'
+        required: false
+        default: ''
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  build-windows:
+  release-windows:
     runs-on: windows-latest
     timeout-minutes: 120
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Create logs dir
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\logs" | Out-Null
 
-      - name: Locate app dir (where package.json lives)
+      - name: Locate app dir
         id: locate
         shell: pwsh
         run: |
@@ -41,11 +43,6 @@ jobs:
         working-directory: ${{ env.APP_DIR }}
         run: |
           if (Test-Path "package-lock.json") { npm ci --loglevel verbose } else { npm install --legacy-peer-deps --loglevel verbose }
-
-      - name: Ensure electron-builder available
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
           npx --yes electron-builder --version | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\eb-version.txt"
 
       - name: Patch package.json (minimal safe build config)
@@ -72,7 +69,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Create venv & install Python deps
+      - name: Create venv, deps & download model
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
@@ -83,13 +80,6 @@ jobs:
           & $venvPy -m pip install --upgrade pip
           if (Test-Path 'python/requirements.txt') { & $venvPy -m pip install -r 'python/requirements.txt' }
           & $venvPy -m pip install huggingface_hub hf_transfer
-
-      - name: Download SDXL-turbo model
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          $pyRoot = Join-Path $env:APP_DIR 'resources/python'
-          $venvPy = Join-Path $pyRoot 'venv\Scripts\python.exe'
           $code = @'
 from huggingface_hub import snapshot_download
 from pathlib import Path
@@ -102,25 +92,26 @@ print("Model saved to:", p)
           $code | Set-Content -Path $script -Encoding UTF8
           & $venvPy $script *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\model-download.txt"
 
-      - name: Build Windows installer
+      - name: (Optional) create tag
+        if: ${{ inputs.tag != '' }}
+        shell: pwsh
+        run: |
+          git tag "${{ inputs.tag }}"
+          git push origin "${{ inputs.tag }}"
+
+      - name: Build & publish with electron-builder
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
-        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $env:DEBUG="electron-builder"
-          npx electron-builder --win --x64 --publish never *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\electron-builder.txt"
-
-      - name: Upload installers
-        uses: actions/upload-artifact@v4
-        with:
-          name: installer-windows
-          path: ${{ env.APP_DIR }}\dist\*
-          if-no-files-found: warn
+          npx electron-builder --win --x64 --publish always *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\electron-builder.txt"
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs
+          name: release-logs
           path: logs\**
           if-no-files-found: warn
