@@ -14,15 +14,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 先安裝 Node，不啟用 cache（避免沒有 lock 檔時失敗）
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: '20'    # <== 拿掉 cache: 'npm'
+          node-version: '20'
+
+      # 只有存在 lock 檔才啟用 npm cache
+      - name: Enable npm cache if lockfile exists
+        if: ${{ hashFiles('**/package-lock.json', '**/yarn.lock', '**/npm-shrinkwrap.json') != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
 
       - name: Install Node deps
         shell: pwsh
         run: |
-          if (Test-Path package-lock.json) { npm ci } else { npm i --no-fund --no-audit }
+          if (Test-Path package-lock.json) { npm ci } else { npm i }
 
       - name: Prepare Python (venv + deps + PBS marker)
         shell: pwsh
