@@ -17,27 +17,34 @@
     "electron": "^30.0.0",
     "electron-builder": "^24.13.3"
   },
+
   "build": {
     "appId": "com.evi.brush.desktop",
     "productName": "EVI Brush Desktop",
+
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "build"
     },
+
     "files": [
       "**/*",
-      "!python/venv/**",
-      "!python/models/**",
-      "!logs/**",
+      "!**/*.log",
+      "!**/*.md",
       "!.git/**",
       "!.github/**",
-      "!**/*.log",
-      "!**/*.md"
+      "!node_modules/.cache/**"
     ],
+
+    /* 關鍵：把整個 resources/python 連同 venv、pbs、models 都打進包 */
     "extraResources": [
-      { "from": "python/models", "to": "resources/python/models", "filter": ["**/*"] }
+      { "from": "resources/python", "to": "resources/python", "filter": ["**/*"] }
     ],
+
+    /* extraResources 已將 Python 放在 app.asar 外側，這裡不用再特別解壓 */
     "asar": true,
-    "asarUnpack": ["python/**"],
+    "asarUnpack": [],
+
     "win": {
       "icon": "build/icon.ico",
       "target": ["nsis"]
