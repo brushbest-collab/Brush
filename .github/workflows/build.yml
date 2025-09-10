@@ -9,6 +9,10 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      APP_DIR: ${{ github.workspace }}
+      DOWNLOAD_MODEL: 'false'   # build 不抓模型；release.yml 會改成 true
 
     steps:
       - name: Checkout
@@ -17,81 +21,69 @@ jobs:
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: '20'
 
-      - name: Install Node dependencies
+      - name: Install Node deps
         shell: pwsh
         run: |
-          if (Test-Path package-lock.json) { npm ci } else { npm i }
+          if (Test-Path "package-lock.json") { npm ci } else { npm i }
 
       - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Create venv & install Python deps
+      - name: Prepare Python (venv + deps + pbs)
         shell: pwsh
         run: |
-          $app = Resolve-Path .
-          $pyRoot = Join-Path $app 'resources/python'
-          $venv   = Join-Path $pyRoot 'venv'
+          $pyRoot = Join-Path $env:APP_DIR "resources/python"
           New-Item -ItemType Directory -Force -Path $pyRoot | Out-Null
 
-          python -m venv $venv
-          $venvPy = Join-Path $venv 'Scripts/python.exe'
+          python -m venv (Join-Path $pyRoot "venv")
+          $venvPy = Join-Path $pyRoot "venv/Scripts/python.exe"
 
-          & $venvPy -m pip install --upgrade pip wheel
-          if (Test-Path 'python/requirements.txt') {
-            & $venvPy -m pip install -r 'python/requirements.txt'
+          & $venvPy -m pip install --upgrade pip
+          if (Test-Path "python/requirements.txt") {
+            & $venvPy -m pip install -r "python/requirements.txt"
           }
           & $venvPy -m pip install huggingface_hub hf_transfer
 
-          # portable bootstrap marker
-          New-Item -ItemType File -Force -Path (Join-Path $pyRoot 'pbs') | Out-Null
+          # 讓 App 能偵測到 Python 已就緒
+          Set-Content -Path (Join-Path $pyRoot "pbs") -Value "ok" -Encoding ascii
 
-      - name: Download SDXL-Turbo model (best-effort)
+      - name: (Optional) Download SDXL-Turbo model
+        if: ${{ env.DOWNLOAD_MODEL == 'true' }}
         shell: pwsh
-        env:
-          HF_HUB_ENABLE_HF_TRANSFER: "1"
         run: |
-          $app   = Resolve-Path .
-          $pyRoot = Join-Path $app 'resources/python'
-          $venvPy = Join-Path $pyRoot 'venv/Scripts/python.exe'
-          $log = Join-Path $env:GITHUB_WORKSPACE 'logs\model-download.txt'
-          New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
-
-          $code = @"
+          $pyRoot = Join-Path $env:APP_DIR "resources/python"
+          $venvPy = Join-Path $pyRoot "venv/Scripts/python.exe"
+          $code = @'
 from huggingface_hub import snapshot_download
 from pathlib import Path
-root = Path(r'''$pyRoot''')
-target = root / 'models' / 'sd-turbo'
+target = Path("resources/python/models/sd-turbo")
 target.mkdir(parents=True, exist_ok=True)
-try:
-    snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False)
-    print('Model saved to', target)
-except Exception as e:
-    print('Model download skipped:', e)
-"@
-          $code | Out-File dl.py -Encoding utf8
-          & $venvPy dl.py *>&1 | Tee-Object -FilePath $log
-          Remove-Item dl.py -Force
+snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=str(target), local_dir_use_symlinks=False)
+print("Model at", target)
+'@
+          $tmp = Join-Path $env:RUNNER_TEMP "download_model.py"
+          Set-Content -Path $tmp -Value $code -Encoding UTF8
+          & $venvPy $tmp | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\eb.log" -Append
 
       - name: Build (no publish)
         shell: pwsh
         run: |
-          $env:CI = "true"
-          npx electron-builder --win --x64 --publish never *> eb.log
+          npx electron-builder --win --x64 --publish=never | Tee-Object -FilePath eb.log
+          Get-ChildItem dist -Recurse | Select-Object FullName,Length
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
           name: installer-windows
-          path: dist/*
+          path: dist/**/*
 
       - name: Upload logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
-          path: |
-            eb.log
-            logs/**/*.txt
+          path: eb.log
