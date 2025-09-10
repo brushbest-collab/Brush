@@ -1,46 +1,37 @@
-name: Release (PBS + model, GitHub Releases)
+name: Release (Win, publish to GitHub)
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (例如 v1.2.3；空白則自動產生)'
+        description: 'Release tag (e.g., v1.2.3) — 留空則不建立 tag'
         required: false
         default: ''
 
 permissions:
-  contents: write   # 釋出需要寫入權限
+  contents: write
 
 jobs:
   release-windows:
     runs-on: windows-latest
-    timeout-minutes: 180
-
-    env:
-      NPM_CONFIG_FUND: "false"
-      NPM_CONFIG_AUDIT: "false"
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    timeout-minutes: 120
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Create logs dir
         shell: pwsh
-        run: New-Item -Type Directory -Force -Path logs | Out-Null
+        run: New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\logs" | Out-Null
 
-      # 與 build.yml 相同：定位 APP_DIR、安裝 Node、建立 venv、下載模型、修補 package.json
-      - name: Locate app dir (package.json)
+      - name: Locate app dir
         id: locate
         shell: pwsh
         run: |
-          $pkg = Get-ChildItem -Path . -Filter package.json -Recurse -File -Depth 6 `
-                 | Where-Object { $_.FullName -notmatch '\\node_modules\\' } `
-                 | Select-Object -First 1
-          if (-not $pkg) { throw "package.json not found anywhere in the repo." }
-          $dir = $pkg.DirectoryName
-          "APP_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "APP_DIR: $dir"
+          $pkg = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Filter package.json -Recurse -Depth 6 -File |
+            Where-Object { $_.FullName -notmatch '\\node_modules\\' } | Select-Object -First 1
+          if (-not $pkg) { throw "package.json not found" }
+          "APP_DIR=$($pkg.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "APP_DIR = $($pkg.DirectoryName)"
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -51,94 +42,76 @@ jobs:
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          if (Test-Path "package-lock.json") { npm ci } else { npm install --legacy-peer-deps }
+          if (Test-Path "package-lock.json") { npm ci --loglevel verbose } else { npm install --legacy-peer-deps --loglevel verbose }
+          npx --yes electron-builder --version | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\eb-version.txt"
 
-      - name: Setup Python
+      - name: Patch package.json (minimal safe build config)
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          if (-not $pkg.build) { $pkg | Add-Member -NotePropertyName build -NotePropertyValue (@{}) }
+          $b = $pkg.build
+          $b.productName = "EVI Brush Desktop"
+          $b.appId       = "com.evi.brush.desktop"
+          $b.files       = @("**/*","!python/venv/**")
+          $b.extraResources = @(@{ from = "python/models"; to = "resources/python/models"; filter = @("**/*") })
+          $b.asar        = $true
+          $b.asarUnpack  = @("python/**")
+          if (-not $b.win) { $b | Add-Member -NotePropertyName win -NotePropertyValue (@{}) }
+          $b.win.icon    = "build/icon.ico"
+          $b.win.target  = @("nsis")
+          $pkg.publish   = @(@{ provider = "github" })
+          ($pkg | ConvertTo-Json -Depth 100) | Set-Content -Encoding UTF8 package.json
+
+      - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Create venv & install deps
+      - name: Create venv, deps & download model
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
           $pyRoot = Join-Path $env:APP_DIR 'resources/python'
           New-Item -ItemType Directory -Force -Path $pyRoot | Out-Null
           python -m venv (Join-Path $pyRoot 'venv')
-          $venvPy = Join-Path $pyRoot 'venv/Scripts/python.exe'
-          & $venvPy -m pip install --upgrade pip wheel
-          if (Test-Path 'python/requirements.txt') { & $venvPy -m pip install -r python/requirements.txt }
+          $venvPy = Join-Path $pyRoot 'venv\Scripts\python.exe'
+          & $venvPy -m pip install --upgrade pip
+          if (Test-Path 'python/requirements.txt') { & $venvPy -m pip install -r 'python/requirements.txt' }
           & $venvPy -m pip install huggingface_hub hf_transfer
-
-      - name: Download model
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          $venvPy = Join-Path $env:APP_DIR 'resources/python/venv/Scripts/python.exe'
-          & $venvPy -c "
-from pathlib import Path
+          $code = @'
 from huggingface_hub import snapshot_download
-Path('python/models/sd-turbo').mkdir(parents=True, exist_ok=True)
-snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir='python/models/sd-turbo', local_dir_use_symlinks=False)
-"
+from pathlib import Path
+p = Path("python/models/sd-turbo")
+p.mkdir(parents=True, exist_ok=True)
+snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=str(p), local_dir_use_symlinks=False)
+print("Model saved to:", p)
+'@
+          $script = Join-Path $env:RUNNER_TEMP 'dl_model.py'
+          $code | Set-Content -Path $script -Encoding UTF8
+          & $venvPy $script *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\model-download.txt"
 
-      - name: Patch package.json for release (publish=github)
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          function Ensure-Prop { param($obj,$name,$default)
-            if (-not ($obj.PSObject.Properties.Name -contains $name)) {
-              $obj | Add-Member -NotePropertyName $name -NotePropertyValue $default
-            }
-          }
-          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
-          Ensure-Prop $pkg 'build' @{}
-          $b = $pkg.build
-          Ensure-Prop $b 'directories' @{}
-          $b.directories.output = 'dist'
-          $b.files = @('**/*','!python/venv/**','!python/models/**')
-          $b.asar = $true
-          $b.asarUnpack = @('python/**')
-          $b.extraResources = @(@{ from='python/models'; to='resources/python/models'; filter=@('**/*') })
-          Ensure-Prop $b 'win' @{}
-          $b.win.icon   = 'build/icon.ico'
-          $b.win.target = @('nsis')
-          Ensure-Prop $b 'nsis' @{}
-          $b.nsis.oneClick = $false
-          $b.nsis.perMachine = $false
-          $b.nsis.allowToChangeInstallationDirectory = $true
-          $b.nsis.createDesktopShortcut = 'always'
-          $b.nsis.shortcutName = 'EVI Brush Desktop'
-          $b.nsis.uninstallDisplayName = 'EVI Brush Desktop'
-          # 讓 electron-builder 直接發到 GitHub Releases
-          $b.publish = @(@{ provider='github' })
-          ($pkg | ConvertTo-Json -Depth 100) | Set-Content -Path package.json -Encoding UTF8
-
-      - name: Optional tag (create when provided)
-        if: ${{ github.event.inputs.tag != '' }}
+      - name: (Optional) create tag
+        if: ${{ inputs.tag != '' }}
         shell: pwsh
         run: |
-          git config user.name  "github-actions"
-          git config user.email "github-actions@users.noreply.github.com"
-          git tag $env:TAG
-          git push origin $env:TAG
-        env:
-          TAG: ${{ github.event.inputs.tag }}
+          git tag "${{ inputs.tag }}"
+          git push origin "${{ inputs.tag }}"
 
-      - name: Build & publish
+      - name: Build & publish with electron-builder
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $env:DEBUG = 'electron-builder'
-          npx electron-builder --win --x64 --publish always `
-            *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/release-eb.log
+          $env:DEBUG="electron-builder"
+          npx electron-builder --win --x64 --publish always *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\electron-builder.txt"
 
-      - name: Upload release logs
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: release-logs
-          path: logs/**
+          path: logs\**
           if-no-files-found: warn
