@@ -1,48 +1,46 @@
-name: Release (manual)
+name: Release (PBS + model, GitHub Releases)
 
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version tag (e.g. v0.4.0) — optional"
+      tag:
+        description: "Release tag (例如 v1.2.3；留空則自動產生)"
         required: false
         default: ""
-      prerelease:
-        description: "Mark as prerelease? (true/false)"
-        required: false
-        default: "false"
 
 permissions:
   contents: write
 
 jobs:
   release-windows:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 180
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      NPM_CONFIG_FUND: false
-      NPM_CONFIG_AUDIT: false
-      CSC_IDENTITY_AUTO_DISCOVERY: false
+      NPM_CONFIG_FUND: "false"
+      NPM_CONFIG_AUDIT: "false"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare logs
+      - name: Create logs dir
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path logs | Out-Null
 
-      - name: Locate app dir
+      # 決定 APP_DIR
+      - name: Locate app directory
         id: locate
         shell: pwsh
         run: |
-          $pkg = Get-ChildItem -Filter package.json -Recurse -File -Depth 6 | Where-Object { $_.FullName -notmatch '\\node_modules\\' } | Select-Object -First 1
-          if (-not $pkg) { throw "package.json not found" }
-          "APP_DIR=$($pkg.DirectoryName)" | Out-File -Append -FilePath $env:GITHUB_ENV
+          $pkg = Get-ChildItem -Path . -Filter package.json -Recurse -File -Depth 6 |
+                 Where-Object { $_.FullName -notmatch '\\node_modules\\' } |
+                 Select-Object -First 1
+          if (-not $pkg) { throw "package.json not found anywhere in the repo." }
+          "APP_DIR=$($pkg.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "APP_DIR=$($pkg.DirectoryName)"
 
+      # Node & deps
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -52,32 +50,156 @@ jobs:
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          if (Test-Path "package-lock.json") { npm ci } else { npm install --legacy-peer-deps }
-          npx --yes electron-builder --version | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/eb-version.txt
+          if (Test-Path "package-lock.json") {
+            npm ci --loglevel verbose *>&1 | Tee-Object $env:GITHUB_WORKSPACE/logs/05-npm-install.log
+          } else {
+            npm install --legacy-peer-deps --loglevel verbose *>&1 | Tee-Object $env:GITHUB_WORKSPACE/logs/05-npm-install.log
+          }
 
-      - name: Build & Publish to GitHub Release
+      - name: Ensure electron-builder
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if ("${{ github.event.inputs.version }}" -ne "") {
-            $pkg = Get-Content package.json -Raw | ConvertFrom-Json
-            $pkg.version = "${{ github.event.inputs.version }}".TrimStart("v")
-            ($pkg | ConvertTo-Json -Depth 100) | Set-Content package.json -Encoding UTF8
+          npx --yes electron-builder --version |
+            Tee-Object $env:GITHUB_WORKSPACE/logs/06-electron-builder-version.txt
+
+      - name: Ensure icon
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          if (-not (Test-Path "build")) { New-Item -ItemType Directory -Path build | Out-Null }
+          if (-not (Test-Path "build\icon.ico")) { throw "Missing build\icon.ico" }
+
+      # 修補 build 區塊
+      - name: Patch package.json build section
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          if (-not ($pkg.PSObject.Properties.Name -contains 'build')) { $pkg | Add-Member build (@{}) }
+          $b = $pkg.build
+          if (-not ($b.PSObject.Properties.Name -contains 'directories')) { $b | Add-Member directories (@{}) }
+          $b.directories.output = "dist"
+          $b.files = @("**/*","!python/venv/**","!python/models/**")
+          $b.extraResources = @(@{ from = "python/models"; to = "resources/python/models"; filter = @("**/*") })
+          if (-not ($b.PSObject.Properties.Name -contains 'asar')) { $b | Add-Member asar $true } else { $b.asar = $true }
+          $b.asarUnpack = @("python/**")
+          if (-not ($b.PSObject.Properties.Name -contains 'win')) { $b | Add-Member win (@{}) }
+          $b.win.icon   = "build/icon.ico"
+          $b.win.target = @("nsis")
+          $pkg | ConvertTo-Json -Depth 100 | Set-Content package.json -Encoding UTF8
+
+      # 7-Zip
+      - name: Ensure 7-Zip
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files\7-Zip\7z.exe")) {
+            choco install 7zip -y
           }
+
+      # PBS + venv + 依賴
+      - name: Bundle PBS
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          $urls = @(
+            "https://github.com/indygreg/python-build-standalone/releases/download/20240713/cpython-3.10.14+20240713-x86_64-pc-windows-msvc-shared-pgo-full.tar.zst",
+            "https://github.com/indygreg/python-build-standalone/releases/download/20240408/cpython-3.10.14+20240408-x86_64-pc-windows-msvc-shared-pgo-full.tar.zst",
+            "https://github.com/indygreg/python-build-standalone/releases/download/20231002/cpython-3.10.13+20231002-x86_64-pc-windows-msvc-shared-pgo-full.tar.zst"
+          )
+          New-Item -ItemType Directory -Force -Path python | Out-Null
+          $dst = "pbs.tar.zst"; $ok=$false
+          foreach($u in $urls){ try{ Invoke-WebRequest $u -OutFile $dst -UseBasicParsing; if((Get-Item $dst).Length -gt 0){$ok=$true;break} }catch{} }
+          if(-not $ok){ throw "PBS download failed" }
+          $seven="C:\Program Files\7-Zip\7z.exe"; if(-not(Test-Path $seven)){ $seven="7z" }
+          & $seven x "$dst" -aoa | Out-Host
+          & $seven x "pbs.tar" -aoa -o"python\_pbs_extract" | Out-Host
+          Remove-Item "$dst","pbs.tar" -Force
+          $py = Get-ChildItem "python\_pbs_extract" -Recurse -Filter python.exe | Select-Object -First 1
+          if(-not $py){ throw "python.exe not found after PBS extraction." }
+          New-Item -ItemType Directory -Force -Path "python\pbs" | Out-Null
+          Copy-Item $py.Directory.FullName\* -Destination "python\pbs" -Recurse -Force
+
+      - name: Create venv & deps
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          & "python\pbs\python.exe" -m venv python\venv
+          $venvPy = "python\venv\Scripts\python.exe"
+          & $venvPy -m pip install --upgrade pip wheel
+          $req = "python\requirements.txt"
+          if(-not(Test-Path $req) -and (Test-Path "python\requirements")){ Copy-Item "python\requirements" $req }
+          if(Test-Path $req){ & $venvPy -m pip install -r $req }
+          & $venvPy -m pip install huggingface_hub hf_transfer
+
+      - name: Download SDXL-Turbo
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          $venvPy = "python\venv\Scripts\python.exe"
+          $code = @'
+from huggingface_hub import snapshot_download
+from pathlib import Path
+t = Path("python/models/sd-turbo")
+t.mkdir(parents=True, exist_ok=True)
+snapshot_download(repo_id="stabilityai/sdxl-turbo",
+                  local_dir=str(t),
+                  local_dir_use_symlinks=False)
+print("model ->", t)
+'@
+          $tmp = Join-Path $env:RUNNER_TEMP "dl_model.py"
+          Set-Content -Path $tmp -Value $code -Encoding UTF8
+          & $venvPy $tmp | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/10-model-download.log
+
+      # Build（先不直接 publish，由我們手動上傳 release）
+      - name: Build (continue even if EB exits non-zero)
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        continue-on-error: true
+        run: |
           $env:DEBUG="electron-builder"
-          npx electron-builder --win --x64 --publish always *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/release-eb.log
+          npx electron-builder --win --x64 --publish=never *>&1 |
+            Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/11-electron-builder.log
 
-          $pr = "${{ github.event.inputs.prerelease }}"
-          if ($pr -eq "true") {
-            $tag = gh release list --limit 1 --json tagName -q ".[0].tagName"
-            if ($LASTEXITCODE -eq 0 -and $tag) { gh release edit $tag --prerelease }
+      - name: Ensure installers exist
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          $files = Get-ChildItem "dist" -Include *.exe,*.msi,*.zip,*.7z -Recurse -ErrorAction SilentlyContinue
+          if (-not $files) { throw "No installers produced in dist/" }
+          $files | Select FullName,Length | Format-Table -AutoSize | Out-String |
+            Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/12-built-files.txt
+
+      # 產生 tag
+      - name: Compute tag
+        id: meta
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = "v${{ github.run_number }}-${{ github.run_attempt }}"
           }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "TAG=$tag"
 
-      - name: Upload release logs
+      # 建立 Release 並上傳 dist/*
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
+          draft: false
+          prerelease: false
+          files: |
+            ${{ env.APP_DIR }}/dist/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 上傳日誌
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: release-logs
           path: logs/**
+          if-no-files-found: warn
