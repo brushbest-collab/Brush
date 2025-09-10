@@ -1,12 +1,8 @@
-name: Build Desktop App (portable-python, first-run venv)
+name: Build Desktop App (portable python)
 
 on:
   workflow_dispatch:
-    inputs:
-      include_model:
-        description: "Bundle SDXL-Turbo model (true/false)"
-        required: false
-        default: "true"
+  # 如果你不想一 push 就跑，註解掉下面三行
   push:
     branches: [ main, master ]
 
@@ -17,6 +13,10 @@ jobs:
   build-windows:
     runs-on: windows-latest
     timeout-minutes: 180
+    env:
+      NPM_CONFIG_FUND: false
+      NPM_CONFIG_AUDIT: false
+      CSC_IDENTITY_AUTO_DISCOVERY: false
 
     steps:
       - name: Checkout
@@ -40,30 +40,19 @@ jobs:
         with:
           node-version: 20
 
-      - name: Patch package.json build (asar=false + extraResources)
+      - name: Install Node deps (lockfile-aware)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
-          $pkg.build = @{
-            appId       = "com.evi.brush.desktop";
-            productName = "EVI Brush Desktop";
-            directories = @{ output = "dist" };
-            files       = @("**/*","!logs/**","!.github/**","!**/*.log","!**/*.md","!node_modules/*/.cache/**");
-            extraResources = @(@{ from = "python"; to = "python"; filter = @("**/*") });
-            asar = $false;
-            win  = @{ icon="build/icon.ico"; target=@("nsis") };
-            nsis = @{
-              oneClick=$true; perMachine=$false;
-              allowToChangeInstallationDirectory=$false;
-              createDesktopShortcut=$true; createStartMenuShortcut=$true;
-              shortcutName="EVI Brush Desktop"; runAfterFinish=$true
-            };
-            publish=@(@{provider="github"})
-          }
-          ($pkg | ConvertTo-Json -Depth 100) | Set-Content package.json -Encoding UTF8
+          if (Test-Path "package-lock.json") { npm ci } else { npm install --legacy-peer-deps }
 
-      # 下載可攜式 Python（PBS）到 python/pbs
+      - name: Ensure electron-builder available
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          npx --yes electron-builder --version | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/eb-version.txt
+
+      # 可攜式 Python（同你之前的流程，省略 wheels / model）
       - name: Bundle portable Python (PBS)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
@@ -80,66 +69,12 @@ jobs:
           Remove-Item $zip -Force
           Write-Host "PBS ready."
 
-      # 用 CI 的 Python 3.10 預先把 requirements 做成 wheels（離線可用）
-      - name: Setup Python (for wheels/model only)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Build wheels for offline install
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          $req = if (Test-Path "python/requirements.txt") { "python/requirements.txt" } elseif (Test-Path "python/requirements") { "python/requirements" } else { "" }
-          if ($req -ne "") {
-            python -m pip install --upgrade pip wheel
-            New-Item -ItemType Directory -Force -Path "python/wheels" | Out-Null
-            python -m pip wheel -r $req -w python/wheels
-          } else {
-            Write-Host "No requirements file — skip wheels."
-          }
-
-      - name: Decide include model
-        id: model
-        shell: pwsh
-        run: |
-          $v = "${{ github.event.inputs.include_model }}"
-          if ([string]::IsNullOrWhiteSpace($v)) { $v = "true" }
-          "INCLUDE_MODEL=$v" | Out-File -Append -FilePath $env:GITHUB_ENV
-          Write-Host "INCLUDE_MODEL=$v"
-
-      # ✅ 修正：pwsh here-string 取代 bash heredoc，避免 YAML / shell 語法錯
-      - name: Download SDXL-Turbo model (into python/models)
-        if: env.INCLUDE_MODEL == 'true'
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install huggingface_hub hf_transfer
-          $env:HF_HUB_ENABLE_HF_TRANSFER = "1"
-
-          $code = @'
-from huggingface_hub import snapshot_download
-from pathlib import Path
-target = Path(r"python/models/sd-turbo")
-target.mkdir(parents=True, exist_ok=True)
-snapshot_download(
-    repo_id="stabilityai/sdxl-turbo",
-    local_dir=str(target),
-    local_dir_use_symlinks=False
-)
-print("model at", target)
-'@
-          $code | python -
-
-      - name: Build (succeed if artifacts exist)
+      - name: Build Windows installer
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
           $env:DEBUG="electron-builder"
-          npx electron-builder --win --x64 --publish never *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/eb.log
-          $has = Get-ChildItem dist -Include *.exe,*.msi,*.zip,*.7z -Recurse -ErrorAction SilentlyContinue
-          if (-not $has) { throw "No installers produced." }
+          npx electron-builder --win --x64 --publish never *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/eb-build.log
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
