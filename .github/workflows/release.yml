@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag（例如 v0.1.1；留空則自動用日期）"
+        description: "Release tag（例如 v0.1.1；留空自動用日期）"
         required: false
         default: ""
 
@@ -17,7 +17,7 @@ jobs:
     timeout-minutes: 120
 
     env:
-      APP_DIR: D:\a\${{ github.event.repository.name }}\${{ github.event.repository.name }}
+      APP_DIR: ${{ github.workspace }}
       LOG_DIR: ${{ github.workspace }}\logs
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -25,99 +25,62 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Node dependencies
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Node deps
         shell: pwsh
         run: |
           if (Test-Path -LiteralPath "package-lock.json") { npm ci } else { npm i }
 
-      - name: Set up Python 3.10
+      - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Ensure pbs marker & model dirs
+      - name: Ensure pbs & model folders (safe)
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          $pyRoot   = Join-Path $env:APP_DIR 'python'
+          $pbsDir   = Join-Path $pyRoot 'pbs'
+          $modelDir = Join-Path $pyRoot 'models'
+          New-Item -ItemType Directory -Force -Path $pyRoot   | Out-Null
+          New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
+          if (Test-Path -LiteralPath $pbsDir -PathType Leaf) { Remove-Item -LiteralPath $pbsDir -Force }
+          if (-not (Test-Path -LiteralPath $pbsDir -PathType Container)) { New-Item -ItemType Directory -Force -Path $pbsDir | Out-Null }
           New-Item -ItemType Directory -Force -Path $env:LOG_DIR | Out-Null
-
-          $pyRoot = Join-Path $env:APP_DIR 'python'
-          $pbsDir = Join-Path $pyRoot 'pbs'
-          $modelRoot = Join-Path $pyRoot 'models'
-          # pbs 同名若是檔案，先移除再建資料夾；若是資料夾就直接用
-          if (Test-Path -LiteralPath $pbsDir -PathType Leaf) {
-            Remove-Item -LiteralPath $pbsDir -Force
-          }
-          if (-not (Test-Path -LiteralPath $pbsDir -PathType Container)) {
-            New-Item -ItemType Directory -Force -Path $pbsDir | Out-Null
-          }
           Set-Content -Path (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii
 
-          New-Item -ItemType Directory -Force -Path $modelRoot | Out-Null
-
-      - name: Prepare Python venv + deps + PBS marker
+      - name: Prepare venv + deps
         shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
         run: |
-          $ErrorActionPreference = 'Stop'
           $pyRoot = Join-Path $env:APP_DIR 'python'
-          $venvDir = Join-Path $pyRoot 'venv'
-          $venvPy  = Join-Path $venvDir 'Scripts\python.exe'
-
-          # 建立 venv
-          python -m venv $venvDir
+          $venv   = Join-Path $pyRoot 'venv'
+          $venvPy = Join-Path $venv 'Scripts\python.exe'
+          python -m venv $venv
           & $venvPy -m pip install --upgrade pip *> "$env:LOG_DIR\01_pip_upgrade.log"
-          # 下載模型要用到 huggingface_hub 與 hf_transfer
           & $venvPy -m pip install huggingface_hub hf_transfer *> "$env:LOG_DIR\02_pip_hf.log"
 
       - name: Download SDXL-Turbo model
         shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
         run: |
-          $ErrorActionPreference = 'Stop'
           $pyRoot   = Join-Path $env:APP_DIR 'python'
-          $venvDir  = Join-Path $pyRoot 'venv'
-          $venvPy   = Join-Path $venvDir 'Scripts\python.exe'
-          $modelDir = Join-Path $pyRoot 'models\sd-turbo'
-          New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
+          $venvPy   = Join-Path $pyRoot 'venv\Scripts\python.exe'
+          $target   = Join-Path $pyRoot 'models\sd-turbo'
+          New-Item -ItemType Directory -Force -Path $target | Out-Null
+          $env:HF_HUB_ENABLE_HF_TRANSFER = '1'
+          & $venvPy -c "import os; from huggingface_hub import snapshot_download; t=r'${target}'; os.makedirs(t, exist_ok=True); snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=t, local_dir_use_symlinks=False); print('Model ->', t)" *> "$env:LOG_DIR\03_model_download.log"
 
-          # 使用 hf_transfer 可走環境加速（可選）
-          $env:HF_HUB_ENABLE_HF_TRANSFER = "1"
-
-          & $venvPy - << 'PY' *> "$env:LOG_DIR\03_model_download.log"
-import os
-from huggingface_hub import snapshot_download
-target = os.path.join("python","models","sd-turbo")
-os.makedirs(target, exist_ok=True)
-snapshot_download(repo_id="stabilityai/sdxl-turbo",
-                  local_dir=target,
-                  local_dir_use_symlinks=False)
-print("Model downloaded to:", target)
-PY
-
-      - name: Create tag (optional)
-        if: ${{ github.event.inputs.tag != '' }}
-        shell: pwsh
-        run: |
-          git config user.name  "github-actions"
-          git config user.email "github-actions@github.com"
-          git tag $env:INPUT_TAG
-          git push origin $env:INPUT_TAG
-        env:
-          INPUT_TAG: ${{ github.event.inputs.tag }}
-
-      - name: Build & publish with electron-builder
+      - name: Build & publish (electron-builder)
         shell: pwsh
         env:
-          # electron-builder 用它發佈 Release
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $tag = "${{ github.event.inputs.tag }}"
-          if (-not $tag) {
-            $tag = (Get-Date).ToString('yyyy.MM.dd-HHmm')
-          }
-          # 開啟詳細 log
+          $tag = "${{ github.event.inputs.tag }}"; if (-not $tag) { $tag = (Get-Date).ToString('yyyy.MM.dd-HHmm') }
           npx electron-builder --win --x64 --publish always --config.extraMetadata.version=$tag *> "$env:LOG_DIR\04_eb_release.log"
 
       - name: Upload logs
