@@ -24,22 +24,22 @@
       "output": "dist"
     },
     "files": [
-      "**/*",
-      "!resources/python/venv/**",
-      "!resources/python/models/**",
-      "!logs/**",
-      "!.git/**",
-      "!.github/**",
+      "main.js",
+      "preload.js",
+      "index.html",
+      "build/**",
+      "!python/venv/**",
       "!**/*.log",
-      "!**/*.md"
+      "!**/*.md",
+      "!.git/**",
+      "!.github/**"
     ],
     "extraResources": [
-      { "from": "resources/python/models", "to": "python/models", "filter": ["**/*"] },
-      { "from": "resources/python/venv",   "to": "python/venv",   "filter": ["**/*"] },
-      { "from": "resources/python/pbs",    "to": "python/pbs" }
+      { "from": "python/pbs", "to": "python/pbs" },
+      { "from": "python/models", "to": "python/models", "filter": ["**/*"] }
     ],
     "asar": true,
-    "asarUnpack": ["resources/python/**"],
+    "asarUnpack": ["python/**"],
     "win": {
       "icon": "build/icon.ico",
       "target": ["nsis"]
