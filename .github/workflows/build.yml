@@ -90,26 +90,14 @@ jobs:
           & $venvPy -m pip install huggingface_hub hf_transfer `
             *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/08-pip-hf.log
 
-      # 4) 下載 SDXL-turbo 模型（這步改用 here-string，避免 YAML 斷行問題）
+      # 4) 下載 SDXL-turbo 模型（改成單行 python -c，避免 YAML/Here-String 地獄）
       - name: Download SDXL-turbo model
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
           $venvPy = Join-Path $env:APP_DIR 'resources/python/venv/Scripts/python.exe'
-          $py = @"
-import os
-from pathlib import Path
-from huggingface_hub import snapshot_download
-
-os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '1'
-target = Path('python/models/sd-turbo')
-target.mkdir(parents=True, exist_ok=True)
-snapshot_download(repo_id='stabilityai/sdxl-turbo',
-                  local_dir=str(target),
-                  local_dir_use_symlinks=False)
-print('Model downloaded to', target)
-"@
-          & $venvPy -c $py *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/09-model.log
+          & $venvPy -c "import os, pathlib; from huggingface_hub import snapshot_download; os.environ['HF_HUB_ENABLE_HF_TRANSFER']='1'; target=pathlib.Path('python/models/sd-turbo'); target.mkdir(parents=True, exist_ok=True); snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False); print('Model downloaded to', target)" `
+            *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/09-model.log
 
       # 5) 修補 package.json（打包設定）
       - name: Patch package.json for build
