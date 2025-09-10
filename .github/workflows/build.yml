@@ -3,15 +3,10 @@ name: Build Desktop App (Win, no publish)
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 90
-    env:
-      APP_DIR: ${{ github.workspace }}
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -22,42 +17,37 @@ jobs:
         with:
           node-version: 20
 
-      - name: Enable npm cache if lockfile exists
-        if: ${{ hashFiles('package-lock.json') != '' }}
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-
       - name: Install Node deps
         shell: pwsh
         run: |
-          if (Test-Path 'package-lock.json') { npm ci } else { npm i }
+          npm i
 
-      - name: Ensure pbs marker exists
+      - name: Ensure pbs marker & folders (optional)
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path "python" | Out-Null
-          Set-Content -Path "python/pbs" -Value "ok" -Encoding ascii
+          New-Item -ItemType Directory -Force -Path "logs" | Out-Null
+          New-Item -ItemType Directory -Force -Path "python\models\sd-turbo" | Out-Null
+          New-Item -ItemType File -Force -Path "python\pbs" | Out-Null
 
       - name: Build (no publish)
         shell: pwsh
+        env:
+          DEBUG: "electron-builder"
         run: |
-          $ErrorActionPreference = 'Stop'
-          npx electron-builder --win --x64 --publish=never *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\eb.log"
-
-      - name: Upload installers
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: installer-windows
-          path: dist/*
+          npx electron-builder --win --x64 --publish never 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\eb.log"
 
       - name: Upload logs
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
+          path: logs/*.log
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows
           path: |
-            eb.log
-            **\*.log
+            dist/*.exe
+            dist/*.msi
+            dist/*.zip
+            dist/*.7z
