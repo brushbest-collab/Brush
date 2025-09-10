@@ -27,22 +27,21 @@ jobs:
 
       - name: Install Node deps
         shell: pwsh
-        run: |
-          npm i
+        run: npm i
 
-      - name: Ensure pbs marker & folders
+      - name: Ensure folders and pbs marker
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "logs" | Out-Null
           New-Item -ItemType Directory -Force -Path "python\models\sd-turbo" | Out-Null
-          New-Item -ItemType File -Force -Path "python\pbs" | Out-Null
+          New-Item -ItemType File      -Force -Path "python\pbs" | Out-Null
 
       - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
-      - name: Download SDXL-Turbo model
+      - name: Install python deps and download SDXL-Turbo
         shell: pwsh
         env:
           HF_HUB_ENABLE_HF_TRANSFER: "1"
@@ -56,9 +55,11 @@ from huggingface_hub import snapshot_download
 from pathlib import Path
 target = Path("python/models/sd-turbo")
 target.mkdir(parents=True, exist_ok=True)
-snapshot_download(repo_id="stabilityai/sdxl-turbo",
-                  local_dir=str(target),
-                  local_dir_use_symlinks=False)
+snapshot_download(
+    repo_id="stabilityai/sdxl-turbo",
+    local_dir=str(target),
+    local_dir_use_symlinks=False
+)
 print("Model downloaded to:", target)
 '@
 
