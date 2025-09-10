@@ -1,6 +1,6 @@
 {
   "name": "evi-brush-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "EVI Brush Desktop",
   "main": "main.js",
   "author": "brushbest-collab",
@@ -17,34 +17,23 @@
     "electron": "^30.0.0",
     "electron-builder": "^24.13.3"
   },
-
   "build": {
     "appId": "com.evi.brush.desktop",
     "productName": "EVI Brush Desktop",
-
-    "directories": {
-      "output": "dist",
-      "buildResources": "build"
-    },
-
+    "directories": { "output": "dist" },
     "files": [
       "**/*",
-      "!**/*.log",
-      "!**/*.md",
+      "!logs/**",
       "!.git/**",
       "!.github/**",
-      "!node_modules/.cache/**"
+      "!**/*.log",
+      "!**/*.md"
     ],
-
-    /* 關鍵：把整個 resources/python 連同 venv、pbs、models 都打進包 */
     "extraResources": [
       { "from": "resources/python", "to": "resources/python", "filter": ["**/*"] }
     ],
-
-    /* extraResources 已將 Python 放在 app.asar 外側，這裡不用再特別解壓 */
     "asar": true,
-    "asarUnpack": [],
-
+    "asarUnpack": ["python/**"],
     "win": {
       "icon": "build/icon.ico",
       "target": ["nsis"]
@@ -56,7 +45,9 @@
       "createDesktopShortcut": true,
       "shortcutName": "EVI Brush Desktop",
       "runAfterFinish": true,
-      "uninstallDisplayName": "EVI Brush Desktop"
+      "uninstallDisplayName": "EVI Brush Desktop",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
     }
   }
 }
