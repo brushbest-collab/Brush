@@ -40,7 +40,7 @@ jobs:
         with:
           node-version: 20
 
-      - name: Patch package.json build
+      - name: Patch package.json build (asar=false + extraResources)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
@@ -49,8 +49,8 @@ jobs:
             appId       = "com.evi.brush.desktop";
             productName = "EVI Brush Desktop";
             directories = @{ output = "dist" };
-            files = @("**/*","!logs/**","!.github/**","!**/*.log","!**/*.md","!node_modules/*/.cache/**");
-            extraResources = @(@{from="python"; to="python"; filter=@("**/*")});
+            files       = @("**/*","!logs/**","!.github/**","!**/*.log","!**/*.md","!node_modules/*/.cache/**");
+            extraResources = @(@{ from = "python"; to = "python"; filter = @("**/*") });
             asar = $false;
             win  = @{ icon="build/icon.ico"; target=@("nsis") };
             nsis = @{
@@ -61,18 +61,19 @@ jobs:
             };
             publish=@(@{provider="github"})
           }
-          ($pkg|ConvertTo-Json -Depth 100)|Set-Content package.json -Encoding UTF8
+          ($pkg | ConvertTo-Json -Depth 100) | Set-Content package.json -Encoding UTF8
 
-      # 下載可攜 Python（PBS）到 python/pbs
+      # 下載可攜式 Python（PBS）到 python/pbs
       - name: Bundle portable Python (PBS)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
+          New-Item -ItemType Directory -Force -Path "python" | Out-Null
           $url = "https://github.com/indygreg/python-build-standalone/releases/download/20240713/cpython-3.10.14+20240713-x86_64-pc-windows-msvc-shared-pgo-full.zip"
           $zip = "pbs.zip"
           Invoke-WebRequest -Uri $url -OutFile $zip
-          Expand-Archive -Path $zip -DestinationPath "python\pbs-extract" -Force
-          $py = Get-ChildItem "python\pbs-extract" -Recurse -Filter python.exe | Select-Object -First 1
+          Expand-Archive -Path $zip -DestinationPath "python\_pbs_extract" -Force
+          $py = Get-ChildItem "python\_pbs_extract" -Recurse -Filter python.exe | Select-Object -First 1
           if (-not $py) { throw "pbs python.exe not found" }
           New-Item -ItemType Directory -Force -Path "python\pbs" | Out-Null
           Copy-Item $py.Directory.FullName\* -Destination "python\pbs" -Recurse -Force
@@ -92,35 +93,44 @@ jobs:
           $req = if (Test-Path "python/requirements.txt") { "python/requirements.txt" } elseif (Test-Path "python/requirements") { "python/requirements" } else { "" }
           if ($req -ne "") {
             python -m pip install --upgrade pip wheel
+            New-Item -ItemType Directory -Force -Path "python/wheels" | Out-Null
             python -m pip wheel -r $req -w python/wheels
           } else {
             Write-Host "No requirements file — skip wheels."
           }
 
-      # 是否要把模型打包進去
       - name: Decide include model
         id: model
         shell: pwsh
         run: |
           $v = "${{ github.event.inputs.include_model }}"
-          if ($v -eq "") { $v = "true" }
+          if ([string]::IsNullOrWhiteSpace($v)) { $v = "true" }
           "INCLUDE_MODEL=$v" | Out-File -Append -FilePath $env:GITHUB_ENV
           Write-Host "INCLUDE_MODEL=$v"
 
+      # ✅ 修正：pwsh here-string 取代 bash heredoc，避免 YAML / shell 語法錯
       - name: Download SDXL-Turbo model (into python/models)
         if: env.INCLUDE_MODEL == 'true'
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
+          python -m pip install --upgrade pip
           python -m pip install huggingface_hub hf_transfer
-          $env:HF_HUB_ENABLE_HF_TRANSFER="1"
-          python - << 'PY'
+          $env:HF_HUB_ENABLE_HF_TRANSFER = "1"
+
+          $code = @'
 from huggingface_hub import snapshot_download
 from pathlib import Path
-target = Path('python/models/sd-turbo'); target.mkdir(parents=True, exist_ok=True)
-snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False)
-print('model at', target)
-PY
+target = Path(r"python/models/sd-turbo")
+target.mkdir(parents=True, exist_ok=True)
+snapshot_download(
+    repo_id="stabilityai/sdxl-turbo",
+    local_dir=str(target),
+    local_dir_use_symlinks=False
+)
+print("model at", target)
+'@
+          $code | python -
 
       - name: Build (succeed if artifacts exist)
         shell: pwsh
