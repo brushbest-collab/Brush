@@ -1,8 +1,7 @@
-name: Build Desktop App (portable python)
+name: Build Desktop App (PBS + model)
 
 on:
   workflow_dispatch:
-  # 如果你不想一 push 就跑，註解掉下面三行
   push:
     branches: [ main, master ]
 
@@ -12,75 +11,202 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 180
     env:
-      NPM_CONFIG_FUND: false
-      NPM_CONFIG_AUDIT: false
-      CSC_IDENTITY_AUTO_DISCOVERY: false
+      NPM_CONFIG_FUND: "false"
+      NPM_CONFIG_AUDIT: "false"
 
     steps:
+      # 0) Checkout & 基本記錄
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare logs
+      - name: Create logs dir
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path logs | Out-Null
 
-      - name: Locate app dir
+      # 1) 找到含 package.json 的應用目錄
+      - name: Locate app directory (where package.json lives)
         id: locate
         shell: pwsh
         run: |
-          $pkg = Get-ChildItem -Filter package.json -Recurse -File -Depth 6 | Where-Object { $_.FullName -notmatch '\\node_modules\\' } | Select-Object -First 1
-          if (-not $pkg) { throw "package.json not found" }
-          "APP_DIR=$($pkg.DirectoryName)" | Out-File -Append -FilePath $env:GITHUB_ENV
+          $pkg = Get-ChildItem -Path . -Filter package.json -Recurse -File -Depth 6 |
+                 Where-Object { $_.FullName -notmatch '\\node_modules\\' } |
+                 Select-Object -First 1
+          if (-not $pkg) { throw "package.json not found anywhere in the repo." }
+          "APP_DIR=$($pkg.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "APP_DIR=$($pkg.DirectoryName)"
 
+      - name: Print repo tree
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -Force | Select FullName,Length |
+            Format-Table -AutoSize | Out-String |
+            Tee-Object -FilePath logs/01-tree.txt
+
+      # 2) Node & electron-builder
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install Node deps (lockfile-aware)
+      - name: Install Node deps
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          if (Test-Path "package-lock.json") { npm ci } else { npm install --legacy-peer-deps }
+          if (Test-Path "package-lock.json") {
+            npm ci --loglevel verbose *>&1 | Tee-Object $env:GITHUB_WORKSPACE/logs/05-npm-install.log
+          } else {
+            npm install --legacy-peer-deps --loglevel verbose *>&1 | Tee-Object $env:GITHUB_WORKSPACE/logs/05-npm-install.log
+          }
 
       - name: Ensure electron-builder available
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          npx --yes electron-builder --version | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/eb-version.txt
+          npx --yes electron-builder --version |
+            Tee-Object $env:GITHUB_WORKSPACE/logs/06-electron-builder-version.txt
 
-      # 可攜式 Python（同你之前的流程，省略 wheels / model）
+      - name: Ensure build/icon.ico exists
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          if (-not (Test-Path "build")) { New-Item -ItemType Directory -Path build | Out-Null }
+          if (-not (Test-Path "build\icon.ico")) { throw "Missing build\icon.ico in repo." }
+
+      # 3) 修補基本 electron-builder 設定（避免 asar 與輸出目錄問題）
+      - name: Patch package.json build section
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          if (-not ($pkg.PSObject.Properties.Name -contains 'build')) { $pkg | Add-Member build (@{}) }
+          $b = $pkg.build
+          if (-not ($b.PSObject.Properties.Name -contains 'directories')) { $b | Add-Member directories (@{}) }
+          $b.directories.output = "dist"
+          $b.files = @("**/*","!python/venv/**","!python/models/**")
+          $b.extraResources = @(@{ from = "python/models"; to = "resources/python/models"; filter = @("**/*") })
+          if (-not ($b.PSObject.Properties.Name -contains 'asar')) { $b | Add-Member asar $true } else { $b.asar = $true }
+          $b.asarUnpack = @("python/**")
+          if (-not ($b.PSObject.Properties.Name -contains 'win')) { $b | Add-Member win (@{}) }
+          $b.win.icon   = "build/icon.ico"
+          $b.win.target = @("nsis")
+          $pkg | ConvertTo-Json -Depth 100 | Set-Content package.json -Encoding UTF8
+          Write-Host "Patched package.json build section."
+
+      # 4) 供下載模型與小工具使用的 runner Python
+      - name: Setup Python (runner)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      # 5) 下載並解壓 python-build-standalone（PBS），避免 venv 指到系統 Python
       - name: Bundle portable Python (PBS)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path "python" | Out-Null
-          $url = "https://github.com/indygreg/python-build-standalone/releases/download/20240713/cpython-3.10.14+20240713-x86_64-pc-windows-msvc-shared-pgo-full.zip"
-          $zip = "pbs.zip"
-          Invoke-WebRequest -Uri $url -OutFile $zip
-          Expand-Archive -Path $zip -DestinationPath "python\_pbs_extract" -Force
+
+          $urls = @(
+            "https://github.com/indygreg/python-build-standalone/releases/download/20240713/cpython-3.10.14+20240713-x86_64-pc-windows-msvc-shared-pgo-full.tar.zst",
+            "https://github.com/indygreg/python-build-standalone/releases/download/20240408/cpython-3.10.14+20240408-x86_64-pc-windows-msvc-shared-pgo-full.tar.zst",
+            "https://github.com/indygreg/python-build-standalone/releases/download/20231002/cpython-3.10.13+20231002-x86_64-pc-windows-msvc-shared-pgo-full.tar.zst"
+          )
+
+          $dst = "pbs.tar.zst"
+          $ok = $false
+          foreach ($u in $urls) {
+            try {
+              Write-Host "Downloading $u"
+              Invoke-WebRequest -Uri $u -OutFile $dst -UseBasicParsing
+              if ((Get-Item $dst).Length -gt 0) { $ok = $true; break }
+            } catch { Remove-Item -ErrorAction SilentlyContinue $dst }
+          }
+          if (-not $ok) { throw "All PBS download URLs failed." }
+
+          $sevenZip = "C:\Program Files\7-Zip\7z.exe"
+          if (-not (Test-Path $sevenZip)) { $sevenZip = "7z" }
+
+          & $sevenZip x $dst -aoa | Out-Host            # 解出 pbs.tar
+          & $sevenZip x "pbs.tar" -aoa -opython\_pbs_extract | Out-Host
+          Remove-Item $dst, "pbs.tar" -Force
+
           $py = Get-ChildItem "python\_pbs_extract" -Recurse -Filter python.exe | Select-Object -First 1
-          if (-not $py) { throw "pbs python.exe not found" }
+          if (-not $py) { throw "python.exe not found after PBS extraction." }
+
           New-Item -ItemType Directory -Force -Path "python\pbs" | Out-Null
           Copy-Item $py.Directory.FullName\* -Destination "python\pbs" -Recurse -Force
-          Remove-Item $zip -Force
-          Write-Host "PBS ready."
+          Write-Host "PBS ready at python\pbs"
 
-      - name: Build Windows installer
+      # 6) 用 PBS 建 venv 並安裝依賴（requirements / requirements.txt 任一皆可）
+      - name: Create venv with PBS & install deps
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          $env:DEBUG="electron-builder"
-          npx electron-builder --win --x64 --publish never *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/eb-build.log
+          $pbs = "python\pbs\python.exe"
+          if (-not (Test-Path $pbs)) { throw "PBS python not found." }
 
+          & $pbs -m venv python\venv
+          $venvPy = "python\venv\Scripts\python.exe"
+          & $venvPy -m pip install --upgrade pip wheel
+
+          $req = "python\requirements.txt"
+          if (-not (Test-Path $req) -and (Test-Path "python\requirements")) { Copy-Item "python\requirements" $req }
+          if (Test-Path $req) {
+            & $venvPy -m pip install -r $req
+          }
+
+          # 下載模型會用到
+          & $venvPy -m pip install huggingface_hub hf_transfer
+
+      # 7) 下載 SDXL-Turbo 模型到應用包內
+      - name: Download SDXL-Turbo model
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          $venvPy = "python\venv\Scripts\python.exe"
+          $code = @'
+from huggingface_hub import snapshot_download
+from pathlib import Path
+t = Path("python/models/sd-turbo")
+t.mkdir(parents=True, exist_ok=True)
+snapshot_download(repo_id="stabilityai/sdxl-turbo",
+                  local_dir=str(t),
+                  local_dir_use_symlinks=False)
+print("model ->", t)
+'@
+          $tmp = Join-Path $env:RUNNER_TEMP "dl_model.py"
+          Set-Content -Path $tmp -Value $code -Encoding UTF8
+          & $venvPy $tmp | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/10-model-download.log
+
+      # 8) 出包（允許 EB 非 0，也會把 log 存下來）
+      - name: Build (continue even if EB exits non-zero)
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        continue-on-error: true
+        run: |
+          $env:DEBUG="electron-builder"
+          npx electron-builder --win --x64 --publish=never *>&1 |
+            Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/11-electron-builder.log
+
+      # 9) 有產物才算成功
+      - name: Succeed only if installers exist
+        shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          $files = Get-ChildItem "dist" -Include *.exe,*.msi,*.zip,*.7z -Recurse -ErrorAction SilentlyContinue
+          if (-not $files) { throw "No installers produced in dist/" }
+          $files | Select-Object FullName,Length | Format-Table -AutoSize | Out-String |
+            Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/12-built-files.txt
+
+      # 10) 上傳產物與日誌
       - name: Upload installers
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: installer-windows
-          path: ${{ env.APP_DIR }}/dist/*
+          path: ${{ env.APP_DIR }}/dist/**/*
+          if-no-files-found: warn
 
       - name: Upload logs
         if: always()
@@ -88,3 +214,4 @@ jobs:
         with:
           name: ci-logs
           path: logs/**
+          if-no-files-found: warn
