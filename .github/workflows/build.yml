@@ -11,12 +11,13 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 180
     env:
       NPM_CONFIG_FUND: "false"
       NPM_CONFIG_AUDIT: "false"
 
     steps:
-      # 0) Checkout & 基本記錄
+      # 0) Checkout & logs
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -25,7 +26,7 @@ jobs:
         run: New-Item -ItemType Directory -Force -Path logs | Out-Null
 
       # 1) 找到含 package.json 的應用目錄
-      - name: Locate app directory (where package.json lives)
+      - name: Locate app directory
         id: locate
         shell: pwsh
         run: |
@@ -73,7 +74,7 @@ jobs:
           if (-not (Test-Path "build")) { New-Item -ItemType Directory -Path build | Out-Null }
           if (-not (Test-Path "build\icon.ico")) { throw "Missing build\icon.ico in repo." }
 
-      # 3) 修補基本 electron-builder 設定（避免 asar 與輸出目錄問題）
+      # 3) 修補 electron-builder 設定
       - name: Patch package.json build section
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
@@ -93,13 +94,15 @@ jobs:
           $pkg | ConvertTo-Json -Depth 100 | Set-Content package.json -Encoding UTF8
           Write-Host "Patched package.json build section."
 
-      # 4) 供下載模型與小工具使用的 runner Python
-      - name: Setup Python (runner)
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
+      # 4) 7-Zip（PBS 需要）
+      - name: Ensure 7-Zip
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files\7-Zip\7z.exe")) {
+            choco install 7zip -y
+          }
 
-      # 5) 下載並解壓 python-build-standalone（PBS），避免 venv 指到系統 Python
+      # 5) 下載 & 解壓 PBS，避免 venv 指到 runner Python
       - name: Bundle portable Python (PBS)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
@@ -127,9 +130,9 @@ jobs:
           $sevenZip = "C:\Program Files\7-Zip\7z.exe"
           if (-not (Test-Path $sevenZip)) { $sevenZip = "7z" }
 
-          & $sevenZip x $dst -aoa | Out-Host            # 解出 pbs.tar
-          & $sevenZip x "pbs.tar" -aoa -opython\_pbs_extract | Out-Host
-          Remove-Item $dst, "pbs.tar" -Force
+          & $sevenZip x "$dst" -aoa | Out-Host
+          & $sevenZip x "pbs.tar" -aoa -o"python\_pbs_extract" | Out-Host
+          Remove-Item "$dst","pbs.tar" -Force
 
           $py = Get-ChildItem "python\_pbs_extract" -Recurse -Filter python.exe | Select-Object -First 1
           if (-not $py) { throw "python.exe not found after PBS extraction." }
@@ -138,7 +141,7 @@ jobs:
           Copy-Item $py.Directory.FullName\* -Destination "python\pbs" -Recurse -Force
           Write-Host "PBS ready at python\pbs"
 
-      # 6) 用 PBS 建 venv 並安裝依賴（requirements / requirements.txt 任一皆可）
+      # 6) 用 PBS 建 venv 安裝依賴
       - name: Create venv with PBS & install deps
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
@@ -152,14 +155,11 @@ jobs:
 
           $req = "python\requirements.txt"
           if (-not (Test-Path $req) -and (Test-Path "python\requirements")) { Copy-Item "python\requirements" $req }
-          if (Test-Path $req) {
-            & $venvPy -m pip install -r $req
-          }
+          if (Test-Path $req) { & $venvPy -m pip install -r $req }
 
-          # 下載模型會用到
           & $venvPy -m pip install huggingface_hub hf_transfer
 
-      # 7) 下載 SDXL-Turbo 模型到應用包內
+      # 7) 下載 SDXL-Turbo 模型
       - name: Download SDXL-Turbo model
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
@@ -179,7 +179,7 @@ print("model ->", t)
           Set-Content -Path $tmp -Value $code -Encoding UTF8
           & $venvPy $tmp | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/10-model-download.log
 
-      # 8) 出包（允許 EB 非 0，也會把 log 存下來）
+      # 8) 出包（容忍 EB 非 0，最後再檢查產物）
       - name: Build (continue even if EB exits non-zero)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
