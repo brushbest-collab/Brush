@@ -1,7 +1,7 @@
-name: Build Desktop App (Win, Python + model)
+name: Build Desktop App (Win, no publish)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
   push:
     branches: [ main, master ]
 
@@ -12,16 +12,19 @@ jobs:
   build-windows:
     runs-on: windows-latest
     timeout-minutes: 120
+    env:
+      NPM_CONFIG_FUND: "false"
+      NPM_CONFIG_AUDIT: "false"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Create logs dir
+      - name: Ensure logs dir
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\logs" | Out-Null
 
-      - name: Locate app dir (where package.json lives)
+      - name: Locate app dir
         id: locate
         shell: pwsh
         run: |
@@ -31,7 +34,7 @@ jobs:
           "APP_DIR=$($pkg.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "APP_DIR = $($pkg.DirectoryName)"
 
-      - name: Setup Node
+      - name: Setup Node 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -41,86 +44,29 @@ jobs:
         working-directory: ${{ env.APP_DIR }}
         run: |
           if (Test-Path "package-lock.json") { npm ci --loglevel verbose } else { npm install --legacy-peer-deps --loglevel verbose }
-
-      - name: Ensure electron-builder available
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
           npx --yes electron-builder --version | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\eb-version.txt"
 
-      - name: Patch package.json (minimal safe build config)
+      - name: Build (no publish)
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
-          if (-not $pkg.build) { $pkg | Add-Member -NotePropertyName build -NotePropertyValue (@{}) }
-          $b = $pkg.build
-          $b.productName = "EVI Brush Desktop"
-          $b.appId       = "com.evi.brush.desktop"
-          $b.files       = @("**/*","!python/venv/**")
-          $b.extraResources = @(@{ from = "python/models"; to = "resources/python/models"; filter = @("**/*") })
-          $b.asar        = $true
-          $b.asarUnpack  = @("python/**")
-          if (-not $b.win) { $b | Add-Member -NotePropertyName win -NotePropertyValue (@{}) }
-          $b.win.icon    = "build/icon.ico"
-          $b.win.target  = @("nsis")
-          $pkg.publish   = @(@{ provider = "github" })
-          ($pkg | ConvertTo-Json -Depth 100) | Set-Content -Encoding UTF8 package.json
-
-      - name: Setup Python 3.10
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Create venv & install Python deps
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          $pyRoot = Join-Path $env:APP_DIR 'resources/python'
-          New-Item -ItemType Directory -Force -Path $pyRoot | Out-Null
-          python -m venv (Join-Path $pyRoot 'venv')
-          $venvPy = Join-Path $pyRoot 'venv\Scripts\python.exe'
-          & $venvPy -m pip install --upgrade pip
-          if (Test-Path 'python/requirements.txt') { & $venvPy -m pip install -r 'python/requirements.txt' }
-          & $venvPy -m pip install huggingface_hub hf_transfer
-
-      - name: Download SDXL-turbo model
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          $pyRoot = Join-Path $env:APP_DIR 'resources/python'
-          $venvPy = Join-Path $pyRoot 'venv\Scripts\python.exe'
-          $code = @'
-from huggingface_hub import snapshot_download
-from pathlib import Path
-p = Path("python/models/sd-turbo")
-p.mkdir(parents=True, exist_ok=True)
-snapshot_download(repo_id="stabilityai/sdxl-turbo", local_dir=str(p), local_dir_use_symlinks=False)
-print("Model saved to:", p)
-'@
-          $script = Join-Path $env:RUNNER_TEMP 'dl_model.py'
-          $code | Set-Content -Path $script -Encoding UTF8
-          & $venvPy $script *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\model-download.txt"
-
-      - name: Build Windows installer
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        continue-on-error: true
-        run: |
-          $env:DEBUG="electron-builder"
-          npx electron-builder --win --x64 --publish never *>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\electron-builder.txt"
+          npx electron-builder --win --x64 --publish never 2>&1 |
+            Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\electron-builder.txt"
+          if (-not (Get-ChildItem -Path "dist" -Include *.exe,*.msi -Recurse -ErrorAction SilentlyContinue)) {
+            throw "No installers produced."
+          }
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
         with:
           name: installer-windows
-          path: ${{ env.APP_DIR }}\dist\*
-          if-no-files-found: warn
+          path: ${{ env.APP_DIR }}/dist/**
+          if-no-files-found: error
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
-          path: logs\**
+          path: logs/**
           if-no-files-found: warn
