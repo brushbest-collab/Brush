@@ -1,36 +1,30 @@
-name: Release (tag-trigger / auto publish)
+name: Release (manual)
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version tag (e.g. v0.4.0) — optional, leave blank to use package.json version"
+        description: "Version tag (e.g. v0.4.0) — optional"
         required: false
         default: ""
       prerelease:
-        description: "Mark this GitHub Release as pre-release?"
+        description: "Mark as prerelease? (true/false)"
         required: false
         default: "false"
-      include_model:
-        description: "Bundle SDXL-Turbo model (true/false)"
-        required: false
-        default: "true"
 
 permissions:
-  contents: write  # 必須: 讓 Actions 能建立/發佈 Release
+  contents: write
 
 jobs:
   release-windows:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 180
     env:
-      # 讓 electron-builder 能發佈到 GitHub Release
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # 關閉自動找憑證（沒有簽章也能打包）
-      CSC_IDENTITY_AUTO_DISCOVERY: false
-      # 避免 NPM 廣告/稽核
       NPM_CONFIG_FUND: false
       NPM_CONFIG_AUDIT: false
+      CSC_IDENTITY_AUTO_DISCOVERY: false
 
     steps:
       - name: Checkout
@@ -54,125 +48,31 @@ jobs:
         with:
           node-version: 20
 
-      # 修 package.json（asar=false、extraResources、nsis、publish=github）
-      - name: Patch package.json build (asar=false + extraResources)
+      - name: Install Node deps
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         run: |
-          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
-          $pkg.build = @{
-            appId       = "com.evi.brush.desktop";
-            productName = "EVI Brush Desktop";
-            directories = @{ output = "dist" };
-            files       = @("**/*","!logs/**","!.github/**","!**/*.log","!**/*.md","!node_modules/*/.cache/**");
-            extraResources = @(@{ from = "python"; to = "python"; filter = @("**/*") });
-            asar = $false;
-            win  = @{ icon="build/icon.ico"; target=@("nsis") };
-            nsis = @{
-              oneClick=$true; perMachine=$false;
-              allowToChangeInstallationDirectory=$false;
-              createDesktopShortcut=$true; createStartMenuShortcut=$true;
-              shortcutName="EVI Brush Desktop"; runAfterFinish=$true
-            };
-            publish=@(@{provider="github"})
-          }
-          ($pkg | ConvertTo-Json -Depth 100) | Set-Content package.json -Encoding UTF8
+          if (Test-Path "package-lock.json") { npm ci } else { npm install --legacy-peer-deps }
+          npx --yes electron-builder --version | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/eb-version.txt
 
-      # 捆可攜式 Python (PBS) 到 python/pbs
-      - name: Bundle portable Python (PBS)
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          New-Item -ItemType Directory -Force -Path "python" | Out-Null
-          $url = "https://github.com/indygreg/python-build-standalone/releases/download/20240713/cpython-3.10.14+20240713-x86_64-pc-windows-msvc-shared-pgo-full.zip"
-          $zip = "pbs.zip"
-          Invoke-WebRequest -Uri $url -OutFile $zip
-          Expand-Archive -Path $zip -DestinationPath "python\_pbs_extract" -Force
-          $py = Get-ChildItem "python\_pbs_extract" -Recurse -Filter python.exe | Select-Object -First 1
-          if (-not $py) { throw "pbs python.exe not found" }
-          New-Item -ItemType Directory -Force -Path "python\pbs" | Out-Null
-          Copy-Item $py.Directory.FullName\* -Destination "python\pbs" -Recurse -Force
-          Remove-Item $zip -Force
-          Write-Host "PBS ready."
-
-      # 用 runner 的 Python 3.10 預先產 wheels（首啟離線裝）
-      - name: Setup Python (for wheels/model only)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Build wheels for offline install
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          $req = if (Test-Path "python/requirements.txt") { "python/requirements.txt" } elseif (Test-Path "python/requirements") { "python/requirements" } else { "" }
-          if ($req -ne "") {
-            python -m pip install --upgrade pip wheel
-            New-Item -ItemType Directory -Force -Path "python/wheels" | Out-Null
-            python -m pip wheel -r $req -w python/wheels
-          } else {
-            Write-Host "No requirements file — skip wheels."
-          }
-
-      - name: Decide include model
-        id: model
-        shell: pwsh
-        run: |
-          $v = "${{ github.event.inputs.include_model }}"
-          if ([string]::IsNullOrWhiteSpace($v)) { $v = "true" }
-          "INCLUDE_MODEL=$v" | Out-File -Append -FilePath $env:GITHUB_ENV
-          Write-Host "INCLUDE_MODEL=$v"
-
-      # 用 pwsh here-string 呼叫 python（避免 bash heredoc 的 YAML 問題）
-      - name: Download SDXL-Turbo model (into python/models)
-        if: env.INCLUDE_MODEL == 'true'
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install huggingface_hub hf_transfer
-          $env:HF_HUB_ENABLE_HF_TRANSFER = "1"
-
-          $code = @'
-from huggingface_hub import snapshot_download
-from pathlib import Path
-target = Path(r"python/models/sd-turbo")
-target.mkdir(parents=True, exist_ok=True)
-snapshot_download(
-    repo_id="stabilityai/sdxl-turbo",
-    local_dir=str(target),
-    local_dir_use_symlinks=False
-)
-print("model at", target)
-'@
-          $code | python -
-
-      # 這裡用 --publish always，並把「是否預發布」/ tag 帶進去
-      - name: Build & Publish (GitHub Release)
+      - name: Build & Publish to GitHub Release
         shell: pwsh
         working-directory: ${{ env.APP_DIR }}
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # 再保險一次
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if ("${{ github.event.inputs.version }}" -ne "") {
-            # 覆寫 package.json 的 version 以對齊 tag（可選）
             $pkg = Get-Content package.json -Raw | ConvertFrom-Json
             $pkg.version = "${{ github.event.inputs.version }}".TrimStart("v")
             ($pkg | ConvertTo-Json -Depth 100) | Set-Content package.json -Encoding UTF8
           }
-          $pr = "${{ github.event.inputs.prerelease }}"
-          if ($pr -eq "") { $pr = "false" }
           $env:DEBUG="electron-builder"
-          # 產生 artifact 並立即發佈到 GitHub Release
           npx electron-builder --win --x64 --publish always *>&1 | Tee-Object -FilePath $env:GITHUB_WORKSPACE/logs/release-eb.log
-          # 如果 repo 的 Release 要標記 pre-release，動態 PATCH（electron-builder 沒直接 flag）
+
+          $pr = "${{ github.event.inputs.prerelease }}"
           if ($pr -eq "true") {
-            Write-Host "Mark latest release as prerelease"
-            # 依序找出最新 Release 並標記為 prerelease
-            $r = gh release list --limit 1 --json tagName,name -q ".[0].tagName"
-            if ($LASTEXITCODE -eq 0 -and $r) {
-              gh release edit $r --prerelease
-            }
+            $tag = gh release list --limit 1 --json tagName -q ".[0].tagName"
+            if ($LASTEXITCODE -eq 0 -and $tag) { gh release edit $tag --prerelease }
           }
 
       - name: Upload release logs
