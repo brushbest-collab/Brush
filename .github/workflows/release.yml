@@ -6,8 +6,9 @@ on:
 jobs:
   release-windows:
     runs-on: windows-latest
-    env:
-      APP_DIR: ${{ github.workspace }}
+    defaults:
+      run:
+        shell: pwsh
 
     steps:
       - name: Checkout
@@ -18,65 +19,57 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Node deps (skip if no package.json)
-        if: ${{ hashFiles('**/package.json') != '' }}
-        shell: pwsh
+      - name: Install Node deps
         run: |
-          if (Test-Path package-lock.json) { npm ci } else { npm i }
+          if (Test-Path 'package.json') {
+            if (Test-Path 'package-lock.json') { npm ci } else { npm i }
+          }
 
       - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
+      # 建立 pbs 與 model 目錄，並在 pbs 寫入 ok 檔（避免找不到路徑）
       - name: Ensure pbs & model folders (safe)
-        shell: pwsh
         run: |
-          $root   = "${{ github.workspace }}"
-          $pyRoot = Join-Path $root 'python'
-          $pbsDir = Join-Path $pyRoot 'pbs'
-          $mdlDir = Join-Path $pyRoot 'models\sd-turbo'
-          New-Item -ItemType Directory -Force -Path $pbsDir | Out-Null
-          New-Item -ItemType Directory -Force -Path $mdlDir | Out-Null
-          Set-Content -LiteralPath (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii
+          $root  = $env:GITHUB_WORKSPACE
+          $pbs   = Join-Path $root 'python\pbs'
+          $model = Join-Path $root 'python\models\sd-turbo'
+          New-Item -ItemType Directory -Force -Path $pbs,$model | Out-Null
+          Set-Content -Path (Join-Path $pbs 'ok') -Value 'ok' -Encoding ascii
 
+      # 下載 SDXL-Turbo 到 repo 的 python/models/sd-turbo
       - name: Download SDXL-Turbo model
-        shell: pwsh
         run: |
-          python -m pip install -U huggingface_hub hf_transfer
-          python - <<'PY'
-          from pathlib import Path
-          from huggingface_hub import snapshot_download
-          tgt = Path("python/models/sd-turbo")
-          tgt.mkdir(parents=True, exist_ok=True)
-          snapshot_download(repo_id="stabilityai/sdxl-turbo",
-                            local_dir=str(tgt),
-                            local_dir_use_symlinks=False)
-          print("Model saved to:", tgt)
-          PY
+          $root = $env:GITHUB_WORKSPACE
+          $py   = Join-Path $root 'python'
+          $venv = Join-Path $py 'venv'
+          python -m venv $venv
+          & "$venv\Scripts\python.exe" -m pip install --upgrade pip
+          & "$venv\Scripts\python.exe" -m pip install huggingface_hub hf_transfer
+          $code = @"
+from pathlib import Path
+from huggingface_hub import snapshot_download
+target = Path(r'$env:GITHUB_WORKSPACE\python\models\sd-turbo')
+target.mkdir(parents=True, exist_ok=True)
+snapshot_download(repo_id='stabilityai/sdxl-turbo', local_dir=str(target), local_dir_use_symlinks=False)
+print('Model at', target)
+"@
+          $tmp = Join-Path $env:RUNNER_TEMP 'download_model.py'
+          Set-Content -Path $tmp -Value $code -Encoding UTF8
+          & "$venv\Scripts\python.exe" $tmp
 
       - name: Build & publish (electron-builder)
-        if: ${{ hashFiles('**/package.json') != '' }}
-        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path "logs" | Out-Null
-          npx electron-builder --win --x64 *> "logs/eb.log"
+          npx --yes electron-builder --win --x64 --publish always
 
       - name: Upload logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs
+          name: eb.log
           path: logs\**\*.log
-
-      - name: Create GitHub Release
-        if: always()
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ github.run_number }}
-          files: |
-            dist\*.exe
-            dist\*.msi
-            dist\*.zip
+          if-no-files-found: ignore
