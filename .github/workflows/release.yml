@@ -27,15 +27,23 @@ jobs:
         with:
           python-version: '3.10'
 
-      # ✅ 先建立 python\pbs 與模型資料夾，再寫入 ok
+      # ✅ 同樣穩健建立 python\pbs 與模型資料夾
       - name: Ensure pbs & model folders (safe)
         shell: pwsh
         run: |
           $root   = (Get-Location).Path
-          $pbsDir = Join-Path $root 'python\pbs'
-          $mdlDir = Join-Path $root 'python\models\sd-turbo'
-          [System.IO.Directory]::CreateDirectory($pbsDir) | Out-Null
-          [System.IO.Directory]::CreateDirectory($mdlDir) | Out-Null
+          $pyDir  = Join-Path $root 'python'
+          $pbsDir = Join-Path $pyDir  'pbs'
+          $mdlDir = Join-Path $pyDir  'models\sd-turbo'
+
+          foreach ($d in @($pyDir,$pbsDir,$mdlDir)) {
+            if (Test-Path $d) {
+              $it = Get-Item $d -ErrorAction SilentlyContinue
+              if ($it -and -not $it.PSIsContainer) { Remove-Item $d -Force }
+            }
+            New-Item -ItemType Directory -Path $d -Force | Out-Null
+          }
+
           Set-Content -LiteralPath (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii -Force
           Write-Host "Prepared $pbsDir and $mdlDir"
 
@@ -73,7 +81,7 @@ jobs:
         shell: pwsh
         run: |
           $dst = Join-Path (Get-Location).Path 'logs\npm'
-          [System.IO.Directory]::CreateDirectory($dst) | Out-Null
+          New-Item -ItemType Directory -Path $dst -Force | Out-Null
           $cands = @('C:\npm\_logs', "$env:USERPROFILE\AppData\Local\npm-cache\_logs")
           foreach ($p in $cands) {
             if (Test-Path $p) {
