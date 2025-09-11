@@ -6,68 +6,53 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
-    env:
-      APP_DIR: ${{ github.workspace }}
+    defaults:
+      run:
+        shell: pwsh
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 只安裝 Node，不做 cache（避免沒有 lock 檔時出錯）
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install Node deps (skip if no package.json)
-        if: ${{ hashFiles('**/package.json') != '' }}
-        shell: pwsh
+      - name: Install Node deps
         run: |
-          if (Test-Path package-lock.json) { npm ci } else { npm i }
+          if (Test-Path 'package.json') {
+            if (Test-Path 'package-lock.json') { npm ci } else { npm i }
+          } else {
+            Write-Host "No package.json — skip npm install"
+          }
 
       - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Ensure python/pbs & model folders (safe)
-        shell: pwsh
+      # 一定會先建立 python/pbs 目錄，再寫入 ok 檔
+      - name: Ensure python/pbs folder (safe)
         run: |
-          $root   = "${{ github.workspace }}"
-          $pyRoot = Join-Path $root 'python'
-          $pbsDir = Join-Path $pyRoot 'pbs'
-          $mdlDir = Join-Path $pyRoot 'models\sd-turbo'
-          New-Item -ItemType Directory -Force -Path $pbsDir | Out-Null
-          New-Item -ItemType Directory -Force -Path $mdlDir | Out-Null
-          Set-Content -LiteralPath (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii
-
-      - name: Download SDXL-Turbo model
-        shell: pwsh
-        run: |
-          python -m pip install -U huggingface_hub hf_transfer
-          python - <<'PY'
-          from pathlib import Path
-          from huggingface_hub import snapshot_download
-          tgt = Path("python/models/sd-turbo")
-          tgt.mkdir(parents=True, exist_ok=True)
-          snapshot_download(repo_id="stabilityai/sdxl-turbo",
-                            local_dir=str(tgt),
-                            local_dir_use_symlinks=False)
-          print("Model saved to:", tgt)
-          PY
+          $pbs = Join-Path $env:GITHUB_WORKSPACE 'python\pbs'
+          New-Item -ItemType Directory -Force -Path $pbs | Out-Null
+          Set-Content -Path (Join-Path $pbs 'ok') -Value 'ok' -Encoding ascii
 
       - name: Build (no publish)
-        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path "logs" | Out-Null
-          if (Test-Path package.json) {
-            npx electron-builder --win --x64 --publish never *> "logs/eb.log"
-          } else {
-            'No package.json, skip electron build.' | Out-File -FilePath "logs/eb.log" -Encoding utf8
-          }
+          npx --yes electron-builder --win --x64 --publish never
 
       - name: Upload logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs
-          path: logs\**\*.log
+          name: eb.log
+          path: |
+            dist\*.exe
+            dist\*.msi
+            logs\**\*.log
+          if-no-files-found: warn
