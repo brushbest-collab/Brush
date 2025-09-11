@@ -6,54 +6,65 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
-    env:
-      APP_DIR: ${{ github.workspace }}
+
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Node.js 20
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
 
       - name: Install Node deps (skip if no package.json)
-        shell: pwsh
+        if: ${{ hashFiles('package.json') != '' }}
         run: |
-          if (Test-Path 'package.json') {
-            if (Test-Path 'package-lock.json') { npm ci } else { npm i }
-          } else {
-            Write-Host 'No package.json; skip npm install.'
-          }
+          if (Test-Path package-lock.json) { npm ci }
+          elseif (Test-Path package.json) { npm i }
 
-      - name: Set up Python 3.10
+      - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Ensure python/pbs folder (safe)
-        shell: pwsh
         run: |
-          $root = "${{ env.APP_DIR }}"
-          $py   = Join-Path $root 'python'
-          $pbs  = Join-Path $py   'pbs'
-          New-Item -ItemType Directory -Force -Path $py,$pbs | Out-Null
-          # 放一個 marker，避免後續步驟誤判資料夾不存在
+          $root = "${{ github.workspace }}"
+          $pbs  = Join-Path $root 'python\pbs'
+          New-Item -ItemType Directory -Force -Path $pbs | Out-Null
           Set-Content -LiteralPath (Join-Path $pbs 'ok') -Value 'ok' -Encoding ascii
 
-      # 如果要試 build（專案有 package.json 才會做）
+      - name: Download SDXL-Turbo model
+        run: |
+          python -m pip install -U "huggingface_hub<0.25" hf_transfer
+          $env:HF_HUB_ENABLE_HF_TRANSFER = '1'
+          python - <<'PY'
+          from pathlib import Path
+          from huggingface_hub import snapshot_download
+          p = Path(r'python/models/sd-turbo'); p.mkdir(parents=True, exist_ok=True)
+          snapshot_download(repo_id='stabilityai/sdxl-turbo',
+                            local_dir=str(p),
+                            local_dir_use_symlinks=False)
+          print('model ready')
+          PY
+
       - name: Build (no publish)
         if: ${{ hashFiles('package.json') != '' }}
-        shell: pwsh
         run: |
           npx electron-builder --win --x64 --publish never
 
-      - name: Upload logs
+      - name: Upload logs & outputs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs
+          name: build-outputs
           path: |
             logs\**\*.log
-          if-no-files-found: ignore
+            dist\*.exe
+            dist\*.msi
+            dist\*.zip
