@@ -3,9 +3,6 @@ name: Release (App + Model, split)
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   release-windows:
     runs-on: windows-latest
@@ -30,7 +27,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 僅建立 python/pbs 與模型資料夾(空)，不把模型打進 App
+      # 建立 python\pbs 與模型資料夾（穩健）
       - name: Ensure python/pbs & model folders (safe)
         shell: pwsh
         run: |
@@ -47,33 +44,38 @@ jobs:
           }
           Set-Content -LiteralPath (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii -Force
 
-      # 只出程式（nsis/portable/zip），不含模型
-      - name: Build App (nsis + portable + zip)
+      # -------------------------
+      # 先建 APP（NSIS + Portable）
+      # -------------------------
+      - name: Build App (nsis + portable)
         if: ${{ hashFiles('package.json') != '' }}
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          npx electron-builder --win nsis portable zip --publish never
+          npx electron-builder --win --x64 --publish never
 
       - name: Compute tag
-        id: ver
+        id: tag
         shell: pwsh
-        run: echo "tag=v${{ github.run_number }}" >> $env:GITHUB_OUTPUT
+        run: |
+          $tag = "v$($Env:GITHUB_RUN_NUMBER)"
+          echo "tag=$tag" >> $env:GITHUB_OUTPUT
 
       - name: Create/Update Release (App assets)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: ${{ steps.ver.outputs.tag }}
-          body: |
-            App (portable/zip/nsis). Model is provided separately as split volumes.
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          draft: false
+          prerelease: false
           files: |
-            dist/*-x64.portable.exe
-            dist/*-x64.zip
-            dist/*-x64.nsis.exe
-          fail_on_unmatched_files: true
+            dist/*-x64-portable.exe
+            dist/*Setup*.exe
 
-      # 下載模型並分卷
+      # -------------------------
+      # 打包模型與分卷上傳
+      # -------------------------
       - name: Install deps for model download
         shell: pwsh
         run: |
@@ -89,13 +91,13 @@ jobs:
           $code = @'
           from huggingface_hub import snapshot_download
           import os
-          tgt = os.environ.get("TARGET_DIR")
+          tgt = os.environ["TARGET_DIR"]
           snapshot_download(
               repo_id="stabilityai/sdxl-turbo",
               local_dir=tgt,
               local_dir_use_symlinks=False
           )
-          print("Saved to", tgt)
+          print("Model saved to:", tgt)
           '@
           Set-Content -Path download_model.py -Value $code -Encoding UTF8
           $env:TARGET_DIR = $target
@@ -104,16 +106,24 @@ jobs:
       - name: Pack model into 7z (split 1900MB parts)
         shell: pwsh
         run: |
-          $sevenZip = "${env:ProgramFiles}\7-Zip\7z.exe"
-          if (-not (Test-Path $sevenZip)) { throw "7-Zip not found at $sevenZip" }
-          New-Item -ItemType Directory -Path dist -Force | Out-Null
-          & "$sevenZip" a -t7z -m0=lzma2 -mx=3 -v1900m "dist\sdxl-turbo.7z" "python\models\sd-turbo\*" | Out-Null
-          Get-ChildItem dist -Filter "sdxl-turbo.7z.*" | ForEach-Object { Write-Host "Created $($_.Name) ($([math]::Round($_.Length/1MB)) MB)" }
+          $out = Join-Path (Get-Location).Path 'dist\model'
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          $sevenZip = "C:\Program Files\7-Zip\7z.exe"
+          & $sevenZip a -t7z -mx=3 -v1900m "$out\model-pack.7z" ".\python\models\sd-turbo\*" | Write-Host
 
       - name: Upload model pack parts to the same Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: ${{ steps.ver.outputs.tag }}
-          files: dist/sdxl-turbo.7z.*
-          fail_on_unmatched_files: true
+          tag_name: ${{ steps.tag.outputs.tag }}
+          files: dist/model/model-pack.7z.*
+
+      #（可選）模型下載 log
+      - name: Upload logs (best-effort)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: |
+            C:\npm\_logs\**
+            $HOME\AppData\Local\npm-cache\_logs\**
+          if-no-files-found: ignore
