@@ -6,9 +6,9 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
-    env:
-      APP_DIR: ${{ github.workspace }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    defaults:
+      run:
+        shell: pwsh
 
     steps:
       - name: Checkout
@@ -17,60 +17,54 @@ jobs:
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          # 不要設定 cache，否則沒有 lockfile 會報錯
+          node-version: '20.x'   # 不設定 cache，就不會要求 lock 檔
+
+      - name: Install Node deps (skip if no package.json)
+        run: |
+          if (Test-Path 'package.json') {
+            if (Test-Path 'package-lock.json') { npm ci } else { npm i }
+          } else {
+            Write-Host 'No package.json; skip npm install.'
+          }
 
       - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Ensure python/pbs folder (safe)
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
+      - name: Ensure python/pbs & model folders (safe)
         run: |
-          $py  = Join-Path $pwd 'python'
-          $pbs = Join-Path $py  'pbs'
-          if (-not (Test-Path $pbs)) { New-Item -Path $pbs -ItemType Directory -Force | Out-Null }
-          Set-Content -LiteralPath (Join-Path $pbs 'ok') -Value 'ok' -Encoding Ascii
+          $ErrorActionPreference = 'Stop'
+          $root   = $pwd
+          $py     = Join-Path $root 'python'
+          $pbs    = Join-Path $py 'pbs'
+          $models = Join-Path $py 'models'
+          $sd     = Join-Path $models 'sd-turbo'
 
-      - name: Download SDXL-Turbo model
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
-        env:
-          HF_HUB_ENABLE_HF_TRANSFER: '1'
-        run: |
-          python -m pip install --upgrade pip
-          pip install "huggingface_hub[hf_transfer]"
-          python - <<'PY'
-          from huggingface_hub import snapshot_download
-          from pathlib import Path
-          p = Path("python/models/sd-turbo")
-          p.mkdir(parents=True, exist_ok=True)
-          snapshot_download(repo_id="stabilityai/sdxl-turbo",
-                            local_dir=str(p), local_dir_use_symlinks=False)
-          print("model ok")
-          PY
+          New-Item -ItemType Directory -Force -Path $py     | Out-Null
+          New-Item -ItemType Directory -Force -Path $pbs    | Out-Null
+          New-Item -ItemType Directory -Force -Path $models | Out-Null
+          New-Item -ItemType Directory -Force -Path $sd     | Out-Null
+
+          Set-Content -Path (Join-Path $pbs 'ok') -Value 'ok' -Encoding ascii
+          Write-Host "Prepared python/pbs and models folders."
 
       - name: Build (no publish)
-        shell: pwsh
-        working-directory: ${{ env.APP_DIR }}
+        env:
+          DEBUG: electron-builder
         run: |
-          New-Item -ItemType Directory -Force -Path logs | Out-Null
-          $ErrorActionPreference = 'Stop'
-          npx --yes electron-builder@24.13.3 --win --x64 --publish never *>&1 `
-            | Tee-Object -LiteralPath "$env:GITHUB_WORKSPACE\logs\eb.log"
+          npx electron-builder --win --x64 --publish never
 
       - name: Upload installers
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: installer-windows
+          name: installers
           path: |
             dist\*.exe
             dist\*.msi
             dist\*.zip
-          if-no-files-found: warn
+          if-no-files-found: ignore
 
       - name: Upload logs
         if: always()
@@ -78,4 +72,4 @@ jobs:
         with:
           name: build-logs
           path: logs\**\*.log
-          if-no-files-found: warn
+          if-no-files-found: ignore
