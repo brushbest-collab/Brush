@@ -3,62 +3,64 @@ name: Build Desktop App (Win, no publish)
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 90
-
     env:
       APP_DIR: ${{ github.workspace }}
-      LOG_DIR: ${{ github.workspace }}\logs
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
+      - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
+          # 不啟用 cache，避免沒有 lock file 時出錯
 
       - name: Install Node deps
         shell: pwsh
         run: |
-          if (Test-Path -LiteralPath "package-lock.json") { npm ci } else { npm i }
+          if (Test-Path "package-lock.json") { npm ci } else { npm i }
 
       - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: '3.10'
 
       - name: Ensure python/pbs folder (safe)
         shell: pwsh
         run: |
-          $pyRoot = Join-Path $env:APP_DIR 'python'
-          $pbsDir = Join-Path $pyRoot 'pbs'
-          New-Item -ItemType Directory -Force -Path $pyRoot | Out-Null
-          if (Test-Path -LiteralPath $pbsDir -PathType Leaf) { Remove-Item -LiteralPath $pbsDir -Force }
-          if (-not (Test-Path -LiteralPath $pbsDir -PathType Container)) { New-Item -ItemType Directory -Force -Path $pbsDir | Out-Null }
-          New-Item -ItemType Directory -Force -Path $env:LOG_DIR | Out-Null
+          $pyDir  = Join-Path $env:APP_DIR 'python'
+          $pbsDir = Join-Path $pyDir 'pbs'
+          New-Item -ItemType Directory -Path $pyDir  -Force | Out-Null
+          New-Item -ItemType Directory -Path $pbsDir -Force | Out-Null
           Set-Content -Path (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii
+
+      - name: Download SDXL-Turbo model
+        shell: pwsh
+        run: |
+          $target = Join-Path $env:APP_DIR 'python/models/sd-turbo'
+          New-Item -ItemType Directory -Path $target -Force | Out-Null
+          python - << 'PY'
+          from pathlib import Path
+          from huggingface_hub import snapshot_download
+          target = Path(r"${{ github.workspace }}") / "python" / "models" / "sd-turbo"
+          target.mkdir(parents=True, exist_ok=True)
+          snapshot_download(repo_id="stabilityai/sdxl-turbo",
+                            local_dir=str(target),
+                            local_dir_use_symlinks=False)
+          print("Model saved to", target)
+          PY
 
       - name: Build (no publish)
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          npx electron-builder --win --x64 --publish never *> "$env:LOG_DIR\eb.log"
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs
-          path: ${{ env.LOG_DIR }}\**
-          if-no-files-found: warn
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Path "$env:GITHUB_WORKSPACE\logs" -Force | Out-Null
+          npx electron-builder --win --x64 --publish never *>&1 `
+            | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\eb.log"
 
       - name: Upload installers
         if: always()
@@ -69,4 +71,12 @@ jobs:
             dist\*.exe
             dist\*.msi
             dist\*.zip
+          if-no-files-found: warn
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: logs\**\*.log
           if-no-files-found: warn
