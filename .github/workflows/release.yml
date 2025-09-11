@@ -4,99 +4,83 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Optional tag (e.g. v0.1.0). Leave empty to skip tagging.'
+        description: 'Tag for this release (e.g. v0.1.0). Leave empty to use commit SHA.'
         required: false
-        default: ''
-
-permissions:
-  contents: write   # 發佈 Release / 上傳資產需要
 
 jobs:
   release-windows:
     runs-on: windows-latest
-    defaults:
-      run:
-        shell: pwsh
+    env:
+      APP_DIR: ${{ github.workspace }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
+      - name: Set up Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: '20.x'
+          node-version: '20'
 
-      - name: Install Node deps (skip if no package.json)
+      - name: Install Node deps
+        shell: pwsh
         run: |
-          if (Test-Path 'package.json') {
-            if (Test-Path 'package-lock.json') { npm ci } else { npm i }
-          } else {
-            Write-Host 'No package.json; skip npm install.'
-          }
+          if (Test-Path 'package-lock.json') { npm ci } else { npm i }
 
-      - name: Setup Python 3.10
+      - name: Set up Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Ensure pbs & model folders (safe)
+        shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $root   = $pwd
+          $root   = "${{ env.APP_DIR }}"
           $py     = Join-Path $root 'python'
-          $pbs    = Join-Path $py 'pbs'
-          $models = Join-Path $py 'models'
-          $sd     = Join-Path $models 'sd-turbo'
-          New-Item -ItemType Directory -Force -Path $py,$pbs,$models,$sd | Out-Null
-          Set-Content -Path (Join-Path $pbs 'ok') -Value 'ok' -Encoding ascii
+          $pbs    = Join-Path $py   'pbs'
+          $model  = Join-Path $py   'models\sd-turbo'
+          New-Item -ItemType Directory -Force -Path $py,$pbs,$model | Out-Null
+          Set-Content -LiteralPath (Join-Path $pbs 'ok') -Value 'ok' -Encoding ascii
 
-      - name: Download SDXL-Turbo model -> python/models/sd-turbo
-        run: |
-          $ErrorActionPreference = 'Stop'
-          python -m pip install --upgrade pip
-          python -m pip install "huggingface_hub>=0.23" hf_transfer
-
-          $sd = Join-Path (Join-Path $pwd 'python\models') 'sd-turbo'
-          New-Item -ItemType Directory -Force -Path $sd | Out-Null
-
-          $code = @"
-from huggingface_hub import snapshot_download
-import os
-target = r"$sd"
-os.makedirs(target, exist_ok=True)
-snapshot_download(
-    repo_id="stabilityai/sdxl-turbo",
-    local_dir=target,
-    local_dir_use_symlinks=False
-)
-print("Model saved to:", target)
-"@
-          $tmp = Join-Path $env:RUNNER_TEMP 'download_model.py'
-          Set-Content -Path $tmp -Value $code -Encoding UTF8
-          python $tmp
-
-      - name: Create tag (optional)
-        if: ${{ github.event.inputs.tag != '' }}
-        run: |
-          git config user.name  "github-actions"
-          git config user.email "github-actions@github.com"
-          git tag $env:TAG
-          git push origin $env:TAG
+      - name: Download SDXL-Turbo model
+        shell: pwsh
         env:
-          TAG: ${{ github.event.inputs.tag }}
-
-      - name: Build & publish (GitHub Releases)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DEBUG: electron-builder
+          HF_HUB_ENABLE_HF_TRANSFER: '1'
         run: |
-          npx electron-builder --win --x64 --publish always
+          python - <<'PY'
+          from pathlib import Path
+          from huggingface_hub import snapshot_download
+          target = Path(r"${{ env.APP_DIR }}\python\models\sd-turbo")
+          target.mkdir(parents=True, exist_ok=True)
+          snapshot_download(repo_id="stabilityai/sdxl-turbo",
+                            local_dir=str(target),
+                            local_dir_use_symlinks=False)
+          print("Model saved to:", target)
+          PY
+
+      - name: Build & publish (electron-builder)
+        shell: pwsh
+        run: |
+          npx electron-builder --win --x64
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: release-logs
-          path: logs\**\*.log
+          name: logs
+          path: |
+            logs\**\*.log
           if-no-files-found: ignore
+
+      - name: Create GitHub Release
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag != '' && inputs.tag || github.sha }}
+          name:     ${{ inputs.tag != '' && inputs.tag || github.sha }}
+          files: |
+            dist\*.exe
+            dist\*.msi
+            dist\*.zip
