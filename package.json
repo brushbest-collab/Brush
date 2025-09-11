@@ -8,10 +8,11 @@
   "scripts": {
     "start": "electron .",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder --win nsis portable zip --x64 --publish never"
+    "dist": "electron-builder --win --x64 --publish never"
   },
   "dependencies": {
-    "electron-updater": "^6.1.7"
+    "electron-updater": "^6.1.7",
+    "7zip-bin": "^5.2.0"
   },
   "devDependencies": {
     "electron": "^30.0.0",
@@ -21,16 +22,13 @@
     "appId": "com.evi.brush.desktop",
     "productName": "EVI Brush Desktop",
     "directories": {
-      "output": "dist",
-      "buildResources": "build"
+      "output": "dist"
     },
     "files": [
       "main.js",
       "preload.js",
       "index.html",
       "build/**",
-      "python/**",
-      "!python/models/**",
       "!python/venv/**",
       "!**/*.log",
       "!**/*.md",
@@ -38,20 +36,20 @@
       "!.github/**"
     ],
     "extraResources": [
-      { "from": "python/pbs", "to": "python/pbs" }
+      { "from": "python/pbs", "to": "python/pbs" },
+      { "from": "python/models", "to": "python/models", "filter": ["**/*"] }
     ],
     "asar": true,
-    "asarUnpack": [
-      "python/**"
-    ],
+    "asarUnpack": ["python/**"],
     "win": {
       "icon": "build/icon.ico",
       "target": [
-        "nsis",
-        "portable",
-        "zip"
-      ],
-      "artifactName": "EVI-Brush-Desktop-${version}-${arch}.${ext}"
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-x64-portable.${ext}"
     },
     "nsis": {
       "oneClick": true,
