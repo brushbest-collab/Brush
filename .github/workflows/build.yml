@@ -16,7 +16,7 @@ jobs:
         with:
           node-version: 20
 
-      # 只有有 package.json 才裝依賴
+      # 有 package.json 才安裝
       - name: Install Node deps (skip if no package.json)
         if: ${{ hashFiles('package.json') != '' }}
         shell: pwsh
@@ -28,28 +28,43 @@ jobs:
         with:
           python-version: '3.10'
 
-      # ✅ 以 .NET 方式遞迴建立 python\pbs，再寫入 ok 標記
+      # ✅ 穩健建立 python\pbs：若同名為檔案則移除後建資料夾
       - name: Ensure python/pbs folder (safe)
         shell: pwsh
         run: |
           $root   = (Get-Location).Path
-          $pbsDir = Join-Path $root 'python\pbs'
-          [System.IO.Directory]::CreateDirectory($pbsDir) | Out-Null
+          $pyDir  = Join-Path $root 'python'
+          $pbsDir = Join-Path $pyDir  'pbs'
+
+          # 確保 python 是資料夾
+          if (Test-Path $pyDir) {
+            $it = Get-Item $pyDir -ErrorAction SilentlyContinue
+            if ($it -and -not $it.PSIsContainer) { Remove-Item $pyDir -Force }
+          }
+          New-Item -ItemType Directory -Path $pyDir -Force | Out-Null
+
+          # 若 pbs 是檔案則移除
+          if (Test-Path $pbsDir) {
+            $it = Get-Item $pbsDir -ErrorAction SilentlyContinue
+            if ($it -and -not $it.PSIsContainer) { Remove-Item $pbsDir -Force }
+          }
+          New-Item -ItemType Directory -Path $pbsDir -Force | Out-Null
+
           $ok = Join-Path $pbsDir 'ok'
           Set-Content -LiteralPath $ok -Value 'ok' -Encoding ascii -Force
-          Write-Host "Created $ok"
+          Write-Host "Prepared $pbsDir and wrote $ok"
 
       - name: Build (no publish)
         if: ${{ hashFiles('package.json') != '' }}
         shell: pwsh
         run: npx electron-builder --win --x64 --publish never
 
-      # 收集 npm 日誌到工作區再上傳（避免 rootDirectory 問題）
+      # 收集 npm logs 到工作區
       - name: Collect npm logs (best-effort)
         shell: pwsh
         run: |
           $dst = Join-Path (Get-Location).Path 'logs\npm'
-          [System.IO.Directory]::CreateDirectory($dst) | Out-Null
+          New-Item -ItemType Directory -Path $dst -Force | Out-Null
           $cands = @('C:\npm\_logs', "$env:USERPROFILE\AppData\Local\npm-cache\_logs")
           foreach ($p in $cands) {
             if (Test-Path $p) {
@@ -57,7 +72,6 @@ jobs:
                 Copy-Item -Destination $dst -Force -ErrorAction SilentlyContinue
             }
           }
-          Write-Host "Logs copied to $dst"
 
       - name: Upload logs
         uses: actions/upload-artifact@v4
