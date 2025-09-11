@@ -4,30 +4,24 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (例如 v0.1.0)，可留空'
-        required: false
-        type: string
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
 
 jobs:
   release-windows:
     runs-on: windows-latest
     env:
       APP_DIR: ${{ github.workspace }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Node.js 20
+      - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          # 不啟用 cache，避免沒有 lock file 時出錯
-
-      - name: Install Node deps
-        shell: pwsh
-        run: |
-          if (Test-Path "package-lock.json") { npm ci } else { npm i }
+          node-version: '20'
 
       - name: Setup Python 3.10
         uses: actions/setup-python@v5
@@ -36,49 +30,44 @@ jobs:
 
       - name: Ensure pbs & model folders (safe)
         shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
         run: |
-          $pyDir   = Join-Path $env:APP_DIR 'python'
-          $modelDir= Join-Path $pyDir 'models\sd-turbo'
-          $pbsDir  = Join-Path $pyDir 'pbs'
-          New-Item -ItemType Directory -Path $pyDir    -Force | Out-Null
-          New-Item -ItemType Directory -Path $modelDir -Force | Out-Null
-          New-Item -ItemType Directory -Path $pbsDir   -Force | Out-Null
-          Set-Content -Path (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii
+          $py      = Join-Path $pwd 'python'
+          $pbs     = Join-Path $py  'pbs'
+          $modelSD = Join-Path $py  'models\sd-turbo'
+          New-Item -ItemType Directory -Force -Path $pbs     | Out-Null
+          New-Item -ItemType Directory -Force -Path $modelSD | Out-Null
+          Set-Content -LiteralPath (Join-Path $pbs 'ok') -Value 'ok' -Encoding Ascii
 
       - name: Download SDXL-Turbo model
         shell: pwsh
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          HF_HUB_ENABLE_HF_TRANSFER: '1'
         run: |
-          python - << 'PY'
-          from pathlib import Path
+          python -m pip install --upgrade pip
+          pip install "huggingface_hub[hf_transfer]"
+          python - <<'PY'
           from huggingface_hub import snapshot_download
-          target = Path(r"${{ github.workspace }}") / "python" / "models" / "sd-turbo"
-          target.mkdir(parents=True, exist_ok=True)
+          from pathlib import Path
+          p = Path("python/models/sd-turbo")
+          p.mkdir(parents=True, exist_ok=True)
           snapshot_download(repo_id="stabilityai/sdxl-turbo",
-                            local_dir=str(target),
-                            local_dir_use_symlinks=False)
-          print("Model saved to", target)
+                            local_dir=str(p), local_dir_use_symlinks=False)
           PY
 
-      - name: Create tag (optional)
-        if: ${{ inputs.tag != '' }}
+      - name: Build & publish
         shell: pwsh
-        env:
-          TAG: ${{ inputs.tag }}
+        working-directory: ${{ env.APP_DIR }}
         run: |
-          git config user.name  "github-actions"
-          git config user.email "github-actions@github.com"
-          git tag $env:TAG
-          git push origin $env:TAG
-
-      - name: Build & publish with electron-builder
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Path "$env:GITHUB_WORKSPACE\logs" -Force | Out-Null
-          npx electron-builder --win --x64 *>&1 `
-            | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\logs\eb.log"
+          New-Item -ItemType Directory -Force -Path logs | Out-Null
+          $ErrorActionPreference = 'Stop'
+          # 確保本地有要發佈的 tag（已有就不會重建）
+          if (-not (git tag --list "${{ github.event.inputs.tag }}")) {
+            git tag "${{ github.event.inputs.tag }}"
+          }
+          npx --yes electron-builder@24.13.3 --win --x64 --publish always *>&1 `
+            | Tee-Object -LiteralPath "$env:GITHUB_WORKSPACE\logs\eb.log"
 
       - name: Upload logs
         if: always()
