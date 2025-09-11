@@ -6,43 +6,52 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
-    defaults:
-      run:
-        shell: pwsh
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 只安裝 Node，不做 cache（避免沒有 lock 檔時出錯）
       - name: Setup Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install Node deps
+      - name: Install Node deps (skip if no package.json)
+        shell: pwsh
         run: |
-          if (Test-Path 'package.json') {
-            if (Test-Path 'package-lock.json') { npm ci } else { npm i }
-          } else {
-            Write-Host "No package.json — skip npm install"
-          }
+          if (Test-Path 'package-lock.json') { npm ci }
+          elseif (Test-Path 'package.json') { npm i }
+          else { Write-Host 'No package.json found, skip npm install' }
 
       - name: Setup Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      # 一定會先建立 python/pbs 目錄，再寫入 ok 檔
       - name: Ensure python/pbs folder (safe)
+        shell: pwsh
         run: |
-          $pbs = Join-Path $env:GITHUB_WORKSPACE 'python\pbs'
-          New-Item -ItemType Directory -Force -Path $pbs | Out-Null
-          Set-Content -Path (Join-Path $pbs 'ok') -Value 'ok' -Encoding ascii
+          $pbsDir = Join-Path $env:GITHUB_WORKSPACE 'python\pbs'
+          New-Item -ItemType Directory -Path $pbsDir -Force | Out-Null
+          Set-Content -LiteralPath (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii
+
+      # 如需模型可保留；不需要可移除
+      - name: Download SDXL-Turbo model
+        shell: pwsh
+        run: |
+          python -m pip install -U huggingface_hub hf_transfer > $null
+          python - <<'PY'
+          from huggingface_hub import snapshot_download
+          from pathlib import Path
+          import os
+          target = Path(os.environ["GITHUB_WORKSPACE"]) / "resources" / "python" / "models" / "sd-turbo"
+          target.mkdir(parents=True, exist_ok=True)
+          snapshot_download("stabilityai/sdxl-turbo", local_dir=target, local_dir_use_symlinks=False)
+          print("Model at", target)
+          PY
 
       - name: Build (no publish)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
         run: |
           npx --yes electron-builder --win --x64 --publish never
 
@@ -50,9 +59,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eb.log
+          name: logs
           path: |
-            dist\*.exe
-            dist\*.msi
             logs\**\*.log
-          if-no-files-found: warn
+            C:\npm\cache\_logs\*.log
