@@ -16,7 +16,7 @@ jobs:
         with:
           node-version: 20
 
-      # 只有存在 package.json 才安裝（避免沒有前端專案時失敗）
+      # 只有有 package.json 才裝依賴
       - name: Install Node deps (skip if no package.json)
         if: ${{ hashFiles('package.json') != '' }}
         shell: pwsh
@@ -28,36 +28,36 @@ jobs:
         with:
           python-version: '3.10'
 
+      # ✅ 以 .NET 方式遞迴建立 python\pbs，再寫入 ok 標記
       - name: Ensure python/pbs folder (safe)
         shell: pwsh
         run: |
-          $pbsDir = Join-Path $env:GITHUB_WORKSPACE 'python\pbs'
-          if (-not (Test-Path $pbsDir)) {
-            New-Item -ItemType Directory -Force -Path $pbsDir | Out-Null
-          }
-          Set-Content -LiteralPath (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii
+          $root   = (Get-Location).Path
+          $pbsDir = Join-Path $root 'python\pbs'
+          [System.IO.Directory]::CreateDirectory($pbsDir) | Out-Null
+          $ok = Join-Path $pbsDir 'ok'
+          Set-Content -LiteralPath $ok -Value 'ok' -Encoding ascii -Force
+          Write-Host "Created $ok"
 
       - name: Build (no publish)
         if: ${{ hashFiles('package.json') != '' }}
         shell: pwsh
         run: npx electron-builder --win --x64 --publish never
 
-      # 收集 npm log 到工作區，避免 rootDirectory 錯誤
+      # 收集 npm 日誌到工作區再上傳（避免 rootDirectory 問題）
       - name: Collect npm logs (best-effort)
         shell: pwsh
         run: |
-          $dst = Join-Path $env:GITHUB_WORKSPACE 'logs\npm'
-          New-Item -ItemType Directory -Force -Path $dst | Out-Null
-          $paths = @(
-            'C:\npm\_logs',
-            "$env:USERPROFILE\AppData\Local\npm-cache\_logs"
-          )
-          foreach ($p in $paths) {
+          $dst = Join-Path (Get-Location).Path 'logs\npm'
+          [System.IO.Directory]::CreateDirectory($dst) | Out-Null
+          $cands = @('C:\npm\_logs', "$env:USERPROFILE\AppData\Local\npm-cache\_logs")
+          foreach ($p in $cands) {
             if (Test-Path $p) {
               Get-ChildItem -Path $p -Recurse -File -ErrorAction SilentlyContinue |
                 Copy-Item -Destination $dst -Force -ErrorAction SilentlyContinue
             }
           }
+          Write-Host "Logs copied to $dst"
 
       - name: Upload logs
         uses: actions/upload-artifact@v4
