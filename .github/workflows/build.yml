@@ -16,12 +16,12 @@ jobs:
         with:
           node-version: 20
 
+      # 只有存在 package.json 才安裝（避免沒有前端專案時失敗）
       - name: Install Node deps (skip if no package.json)
+        if: ${{ hashFiles('package.json') != '' }}
         shell: pwsh
         run: |
-          if (Test-Path 'package-lock.json') { npm ci }
-          elseif (Test-Path 'package.json') { npm i }
-          else { Write-Host 'No package.json found, skip npm install' }
+          if (Test-Path package-lock.json) { npm ci } else { npm i }
 
       - name: Setup Python 3.10
         uses: actions/setup-python@v5
@@ -32,34 +32,36 @@ jobs:
         shell: pwsh
         run: |
           $pbsDir = Join-Path $env:GITHUB_WORKSPACE 'python\pbs'
-          New-Item -ItemType Directory -Path $pbsDir -Force | Out-Null
+          if (-not (Test-Path $pbsDir)) {
+            New-Item -ItemType Directory -Force -Path $pbsDir | Out-Null
+          }
           Set-Content -LiteralPath (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii
 
-      # 如需模型可保留；不需要可移除
-      - name: Download SDXL-Turbo model
-        shell: pwsh
-        run: |
-          python -m pip install -U huggingface_hub hf_transfer > $null
-          python - <<'PY'
-          from huggingface_hub import snapshot_download
-          from pathlib import Path
-          import os
-          target = Path(os.environ["GITHUB_WORKSPACE"]) / "resources" / "python" / "models" / "sd-turbo"
-          target.mkdir(parents=True, exist_ok=True)
-          snapshot_download("stabilityai/sdxl-turbo", local_dir=target, local_dir_use_symlinks=False)
-          print("Model at", target)
-          PY
-
       - name: Build (no publish)
+        if: ${{ hashFiles('package.json') != '' }}
+        shell: pwsh
+        run: npx electron-builder --win --x64 --publish never
+
+      # 收集 npm log 到工作區，避免 rootDirectory 錯誤
+      - name: Collect npm logs (best-effort)
         shell: pwsh
         run: |
-          npx --yes electron-builder --win --x64 --publish never
+          $dst = Join-Path $env:GITHUB_WORKSPACE 'logs\npm'
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          $paths = @(
+            'C:\npm\_logs',
+            "$env:USERPROFILE\AppData\Local\npm-cache\_logs"
+          )
+          foreach ($p in $paths) {
+            if (Test-Path $p) {
+              Get-ChildItem -Path $p -Recurse -File -ErrorAction SilentlyContinue |
+                Copy-Item -Destination $dst -Force -ErrorAction SilentlyContinue
+            }
+          }
 
       - name: Upload logs
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: logs
-          path: |
-            logs\**\*.log
-            C:\npm\cache\_logs\*.log
+          path: logs/**/*
+          if-no-files-found: ignore
