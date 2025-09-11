@@ -18,4 +18,105 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Node deps (skip if no package.json
+      - name: Install Node deps (skip if no package.json)
+        if: ${{ hashFiles('package.json') != '' }}
+        shell: pwsh
+        run: |
+          if (Test-Path package-lock.json) { npm ci } else { npm i }
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # 建立 python\pbs 與模型資料夾（具容錯）
+      - name: Ensure pbs & model folders (safe)
+        shell: pwsh
+        run: |
+          $root   = (Get-Location).Path
+          $pyDir  = Join-Path $root 'python'
+          $pbsDir = Join-Path $pyDir  'pbs'
+          $mdlDir = Join-Path $pyDir  'models\sd-turbo'
+
+          foreach ($d in @($pyDir,$pbsDir,$mdlDir)) {
+            if (Test-Path $d) {
+              $it = Get-Item $d -ErrorAction SilentlyContinue
+              if ($it -and -not $it.PSIsContainer) { Remove-Item $d -Force }
+            }
+            New-Item -ItemType Directory -Path $d -Force | Out-Null
+          }
+
+          Set-Content -LiteralPath (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii -Force
+          Write-Host "Prepared $pbsDir and $mdlDir"
+
+      - name: Download SDXL-Turbo model
+        shell: pwsh
+        env:
+          HF_ENDPOINT: https://huggingface.co
+        run: |
+          python -m pip install -U pip
+          python -m pip install "huggingface_hub>=0.22.0" hf_transfer
+          $target = Join-Path (Get-Location).Path 'python\models\sd-turbo'
+          $code = @'
+          from huggingface_hub import snapshot_download
+          import os
+          tgt = os.environ["TARGET_DIR"]
+          snapshot_download(
+              repo_id="stabilityai/sdxl-turbo",
+              local_dir=tgt,
+              local_dir_use_symlinks=False
+          )
+          print("Model saved to:", tgt)
+          '@
+          Set-Content -Path download_model.py -Value $code -Encoding UTF8
+          $env:TARGET_DIR = $target
+          python download_model.py
+
+      # 只 build，不自動 publish，避免空的 Release 或沒有資產
+      - name: Build app (electron-builder)
+        if: ${{ hashFiles('package.json') != '' }}
+        shell: pwsh
+        run: |
+          npx electron-builder --win --x64 --publish never
+          if (Test-Path dist) {
+            Write-Host "Built files:"
+            Get-ChildItem -Path dist -Recurse | ForEach-Object { Write-Host $_.FullName }
+          } else {
+            Write-Error "dist folder not found after build."
+          }
+
+      # 把安裝檔掛到 GitHub Release（可重入、可覆寫）
+      - name: Upload installers to GitHub Release
+        if: ${{ hashFiles('package.json') != '' }}
+        uses: ncipollo/release-action@v1
+        with:
+          tag:  ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          allowUpdates: true
+          generateReleaseNotes: true
+          artifacts: |
+            dist/*.exe
+            dist/*.yml
+            dist/*.blockmap
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # （可選）收集 npm logs，方便除錯
+      - name: Collect npm logs (best-effort)
+        shell: pwsh
+        run: |
+          $dst = Join-Path (Get-Location).Path 'logs\npm'
+          New-Item -ItemType Directory -Path $dst -Force | Out-Null
+          $cands = @('C:\npm\_logs', "$env:USERPROFILE\AppData\Local\npm-cache\_logs")
+          foreach ($p in $cands) {
+            if (Test-Path $p) {
+              Get-ChildItem -Path $p -Recurse -File -ErrorAction SilentlyContinue |
+                Copy-Item -Destination $dst -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: logs/**/*
+          if-no-files-found: ignore
