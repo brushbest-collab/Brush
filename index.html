@@ -1,16 +1,82 @@
 <!doctype html>
-<meta charset="utf-8">
-<title>EVI Brush Desktop</title>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>EVI Brush Desktop</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; margin:24px;}
+    h1{font-size:40px;margin:0 0 12px}
+    .muted{color:#666}
+    button{padding:10px 16px;border-radius:8px;border:1px solid #ccc;cursor:pointer}
+    #log{margin-top:12px;padding:10px;background:#f7f7f9;border:1px solid #e5e5ea;height:180px;overflow:auto;font-family:ui-monospace,Consolas}
+    progress{width:100%;height:12px}
+    .row{margin:8px 0}
+  </style>
+</head>
 <body>
   <h1>EVI Brush Desktop</h1>
-  <div id="status">Checking backend...</div>
+  <div class="muted" id="statusLine">Checking…</div>
+
+  <div id="actions" style="margin-top:16px;display:none">
+    <div class="row">
+      <button id="btnDownload">下載模型（自動續傳 / 302 兼容）</button>
+    </div>
+    <div class="row" id="rowProg" style="display:none">
+      <div id="fileName" class="muted"></div>
+      <progress id="bar" max="100" value="0"></progress>
+    </div>
+    <div id="log"></div>
+  </div>
+
   <script>
-    (async () => {
-      const s = document.getElementById('status');
-      const r = await window.api.checkPbs();
-      s.textContent = (r === 'ok')
-        ? 'Python bootstrap found.'
-        : 'Backend did not start. portable Python bootstrap not found (python/pbs).';
-    })();
+    const fmt = n => n>=1024 ? (n/1024/1024/1024).toFixed(2)+' GB' : n+' B';
+
+    async function boot() {
+      const st = await window.evi.getStatus();
+      const statusLine = document.getElementById('statusLine');
+      const actions = document.getElementById('actions');
+
+      if (!st.hasPbs) {
+        statusLine.textContent = 'Python bootstrap not found（請確認安裝包是否完整）';
+        return;
+      }
+
+      if (st.hasModel) {
+        statusLine.textContent = 'Python bootstrap found. 模型已就緒 ✅';
+        return;
+      }
+
+      statusLine.textContent = 'Python bootstrap found. 模型未安裝。';
+      actions.style.display = 'block';
+    }
+
+    document.getElementById('btnDownload').addEventListener('click', async () => {
+      document.getElementById('log').textContent = '';
+      log('開始下載…');
+      const res = await window.evi.downloadModel();
+      if (res.ok) {
+        log(res.message + (res.outDir ? ' -> ' + res.outDir : ''));
+        document.getElementById('statusLine').textContent = '模型已安裝 ✅';
+        document.getElementById('actions').style.display = 'none';
+      } else {
+        log('失敗：' + res.message);
+      }
+    });
+
+    function log(s){ const el=document.getElementById('log'); el.textContent += s+'\n'; el.scrollTop=el.scrollHeight; }
+    window.evi.onLog(m => log(m));
+    window.evi.onStart(d => {
+      document.getElementById('rowProg').style.display='block';
+      document.getElementById('fileName').textContent = `下載 ${d.index}/${d.total}：${d.name} (${fmt(d.size)})`;
+      document.getElementById('bar').value = 0;
+    });
+    window.evi.onProg(d => {
+      const v = d.total ? Math.min(100, Math.floor(d.done*100/d.total)) : 0;
+      document.getElementById('bar').value = v;
+    });
+    window.evi.onDone(d => log(`完成：${d.name}`));
+
+    boot();
   </script>
 </body>
+</html>
