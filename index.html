@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <title>EVI Brush Desktop</title>
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; margin:24px;}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;margin:24px}
     h1{font-size:40px;margin:0 0 12px}
     .muted{color:#666}
     button{padding:10px 16px;border-radius:8px;border:1px solid #ccc;cursor:pointer}
@@ -36,17 +36,15 @@
       const statusLine = document.getElementById('statusLine');
       const actions = document.getElementById('actions');
 
-      if (!st.hasPbs) {
-        statusLine.textContent = 'Python bootstrap not found（請確認安裝包是否完整）';
-        return;
-      }
-
       if (st.hasModel) {
         statusLine.textContent = 'Python bootstrap found. 模型已就緒 ✅';
         return;
       }
 
-      statusLine.textContent = 'Python bootstrap found. 模型未安裝。';
+      // 只要模型未安裝，無論 hasPbs 與否都允許下載（主程式會自動建立 pbs/ok）
+      statusLine.textContent = st.hasPbs
+        ? 'Python bootstrap found. 模型未安裝。'
+        : 'Python bootstrap not found（已自動建立）。請下載模型。';
       actions.style.display = 'block';
     }
 
