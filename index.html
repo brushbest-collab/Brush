@@ -1,80 +1,82 @@
 <!doctype html>
-<html lang="zh-Hant">
+<html>
 <head>
   <meta charset="utf-8" />
   <title>EVI Brush Desktop</title>
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;margin:24px}
-    h1{font-size:40px;margin:0 0 12px}
-    .muted{color:#666}
-    button{padding:10px 16px;border-radius:8px;border:1px solid #ccc;cursor:pointer}
-    #log{margin-top:12px;padding:10px;background:#f7f7f9;border:1px solid #e5e5ea;height:180px;overflow:auto;font-family:ui-monospace,Consolas}
-    progress{width:100%;height:12px}
-    .row{margin:8px 0}
+    body { font-family: system-ui, Segoe UI, Arial; margin: 24px; }
+    #title { font-size: 48px; margin: 0 0 18px; }
+    #status { color:#444; margin: 6px 0 18px; }
+    #btn { padding:10px 14px; font-size:16px; }
+    #barWrap { width: 640px; height: 10px; background:#eee; margin-top:12px; }
+    #bar { height:100%; width:0; background:#3b82f6; transition: width .15s; }
+    #log { width: 980px; height: 240px; white-space: pre; background:#111; color:#0f0; padding:10px; overflow:auto; }
   </style>
 </head>
 <body>
-  <h1>EVI Brush Desktop</h1>
-  <div class="muted" id="statusLine">Checking…</div>
+  <h1 id="title">EVI Brush Desktop</h1>
+  <div id="status">Checking...</div>
+  <button id="btn" style="display:none">下載模型（自動續傳 / 302 兼容）</button>
+  <div id="barWrap"><div id="bar"></div></div>
+  <pre id="log"></pre>
 
-  <div id="actions" style="margin-top:16px;display:none">
-    <div class="row">
-      <button id="btnDownload">下載模型（自動續傳 / 302 兼容）</button>
-    </div>
-    <div class="row" id="rowProg" style="display:none">
-      <div id="fileName" class="muted"></div>
-      <progress id="bar" max="100" value="0"></progress>
-    </div>
-    <div id="log"></div>
-  </div>
+<script>
+const statusEl = document.getElementById('status');
+const btn = document.getElementById('btn');
+const bar = document.getElementById('bar');
+const logEl = document.getElementById('log');
 
-  <script>
-    const fmt = n => n>=1024 ? (n/1024/1024/1024).toFixed(2)+' GB' : n+' B';
+function log(s){ logEl.textContent += s + '\n'; logEl.scrollTop = logEl.scrollHeight; }
+function setBar(cur, tot){
+  const p = tot > 0 ? Math.min(100, (cur/tot)*100) : 0;
+  bar.style.width = p + '%';
+}
 
-    async function boot() {
-      const st = await window.evi.getStatus();
-      const statusLine = document.getElementById('statusLine');
-      const actions = document.getElementById('actions');
+window.evi.onLog(msg => log(msg));
+window.evi.onProgress(({current,total,label}) => {
+  statusEl.textContent = label;
+  setBar(current,total);
+});
 
-      if (st.hasModel) {
-        statusLine.textContent = 'Python bootstrap found. 模型已就緒 ✅';
-        return;
-      }
+function timeout(ms){ return new Promise(r => setTimeout(() => r('timeout'), ms)); }
 
-      // 只要模型未安裝，無論 hasPbs 與否都允許下載（主程式會自動建立 pbs/ok）
-      statusLine.textContent = st.hasPbs
-        ? 'Python bootstrap found. 模型未安裝。'
-        : 'Python bootstrap not found（已自動建立）。請下載模型。';
-      actions.style.display = 'block';
-    }
+async function boot() {
+  // 5 秒超時的 PBS 檢查
+  const res = await Promise.race([window.evi.checkPbs(), timeout(5000)]);
+  if (res === 'ok') {
+    statusEl.textContent = 'Python bootstrap found. 若未安裝模型，請點下方「下載模型」。';
+  } else if (res === 'missing') {
+    statusEl.textContent = 'Python bootstrap not found（請確認安裝包是否完整）。仍可先下載模型。';
+  } else {
+    statusEl.textContent = '檢查逾時，仍可直接下載模型。';
+  }
+  btn.style.display = 'inline-block';
+}
 
-    document.getElementById('btnDownload').addEventListener('click', async () => {
-      document.getElementById('log').textContent = '';
-      log('開始下載…');
-      const res = await window.evi.downloadModel();
-      if (res.ok) {
-        log(res.message + (res.outDir ? ' -> ' + res.outDir : ''));
-        document.getElementById('statusLine').textContent = '模型已安裝 ✅';
-        document.getElementById('actions').style.display = 'none';
-      } else {
-        log('失敗：' + res.message);
-      }
+btn.addEventListener('click', async () => {
+  btn.disabled = true;
+  setBar(0,1);
+  try {
+    // 依你的 Release 實際設定修改
+    await window.evi.startModels({
+      owner: 'brushbest-collab',
+      repo: 'Brush',
+      tag: 'v73',
+      baseName: 'model-pack.7z',
+      parts: 19,
+      outDir: null
     });
+    statusEl.textContent = '全部模型分卷下載完成。';
+    setBar(1,1);
+  } catch (e) {
+    statusEl.textContent = '下載失敗：' + (e?.message || e);
+    log('ERROR: ' + (e?.stack || e));
+  } finally {
+    btn.disabled = false;
+  }
+});
 
-    function log(s){ const el=document.getElementById('log'); el.textContent += s+'\n'; el.scrollTop=el.scrollHeight; }
-    window.evi.onLog(m => log(m));
-    window.evi.onStart(d => {
-      document.getElementById('rowProg').style.display='block';
-      document.getElementById('fileName').textContent = `下載 ${d.index}/${d.total}：${d.name} (${fmt(d.size)})`;
-      document.getElementById('bar').value = 0;
-    });
-    window.evi.onProg(d => {
-      const v = d.total ? Math.min(100, Math.floor(d.done*100/d.total)) : 0;
-      document.getElementById('bar').value = v;
-    });
-    window.evi.onDone(d => log(`完成：${d.name}`));
-
-    boot();
-  </script>
+boot();
+</script>
 </body>
 </html>
