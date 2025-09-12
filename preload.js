@@ -1,26 +1,20 @@
-// preload.js
 const { contextBridge, ipcRenderer } = require('electron');
 
+function on(channel, cb) {
+  const handler = (_e, data) => cb(data);
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.removeListener(channel, handler);
+}
+
 contextBridge.exposeInMainWorld('evi', {
-  // invoke/handle
-  invoke: (channel, data) => ipcRenderer.invoke(channel, data),
-
-  // subscribe progress/log from main
-  on: (channel, listener) => {
-    ipcRenderer.on(channel, (_, payload) => listener(_, payload));
+  checkPbs: async () => {
+    try { return await ipcRenderer.invoke('check-pbs'); }
+    catch { return 'missing'; }
   },
-  once: (channel, listener) => {
-    ipcRenderer.once(channel, (_, payload) => listener(_, payload));
+  startModels: async (cfg) => {
+    try { return await ipcRenderer.invoke('models:start', cfg); }
+    catch (e) { throw new Error(e?.message || String(e)); }
   },
-  removeAll: (channel) => ipcRenderer.removeAllListeners(channel),
-
-  // 小工具：帶超時的 invoke
-  invokeWithTimeout: (channel, data, ms = 8000) =>
-    new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('timeout')), ms);
-      ipcRenderer
-        .invoke(channel, data)
-        .then((r) => { clearTimeout(t); resolve(r); })
-        .catch((e) => { clearTimeout(t); reject(e); });
-    }),
+  onLog: (cb) => on('dl:log', cb),
+  onProgress: (cb) => on('dl:progress', cb)
 });
