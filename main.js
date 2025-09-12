@@ -1,24 +1,51 @@
-// main.js
-// Electron 主程序：內建最穩下載（BITS -> HTTPS 302 跟隨 + 續傳），支援 GitHub Releases 模型分割檔
-
-const { app, BrowserWindow, ipcMain } = require('electron');
+// main.js  — 完整可覆蓋版
+// ----------------------------------------------------
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const http = require('http');
 const https = require('https');
 const { spawn } = require('child_process');
-const sevenBin = require('7zip-bin');
 
-const isDev = !app.isPackaged;
-
-// === 依專案情況調整（預設指向本 repo 的 Releases） ===
+// ====== 可調參數 ======
 const GH_OWNER = 'brushbest-collab';
 const GH_REPO  = 'Brush';
+const RELEASE_TAG = 'latest';              // 或填 'v73' 這類固定版本
+const ASSET_PREFIX = 'model-pack.7z.';     // 分割檔共同前綴
+const CHUNK_SIZE = 16 * 1024 * 1024;       // 單次請求 16MB
+const MAX_REDIRECT = 5;
+const MAX_RETRY = 5;
 
-// ====================== 視窗 ======================
+// 嘗試取得 7-Zip 可執行檔
+function resolve7z() {
+  try { return require('7zip-bin').path7za; } catch (_) { /* ignore */ }
+  const cand = [
+    path.join(process.resourcesPath, 'bin', '7za.exe'),
+    'C:\\Program Files\\7-Zip\\7z.exe',
+    'C:\\Program Files (x86)\\7-Zip\\7z.exe'
+  ];
+  for (const p of cand) { if (fs.existsSync(p)) return p; }
+  return null;
+}
+
+const isDev = !app.isPackaged;
+function resPath(...p) {
+  // 開發時取專案根；打包後取 resources
+  const base = isDev ? process.cwd() : process.resourcesPath;
+  return path.join(base, ...p);
+}
+
+// 目錄路徑
+const PY_DIR   = resPath('python');
+const PBS_DIR  = resPath('python', 'pbs');
+const MODELS_ROOT = resPath('python', 'models');
+const MODEL_TARGET = path.join(MODELS_ROOT, 'sd-turbo'); // 解壓後的最終資料夾
+const TMP_DIR  = resPath('downloads');
+
+// 建立視窗
 function createWindow() {
   const win = new BrowserWindow({
-    width: 1024,
-    height: 700,
+    width: 1024, height: 700,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true
@@ -26,215 +53,239 @@ function createWindow() {
   });
   win.loadFile(path.join(__dirname, 'index.html'));
   if (isDev) win.webContents.openDevTools({ mode: 'detach' });
+  return win;
 }
-app.whenReady().then(createWindow);
+
+// ---------------------------------------------
+// 基本 I/O
+function ensureDirs() {
+  for (const d of [PY_DIR, PBS_DIR, MODELS_ROOT, TMP_DIR]) {
+    fs.mkdirSync(d, { recursive: true });
+  }
+  // pbs/ok
+  const okFile = path.join(PBS_DIR, 'ok');
+  if (!fs.existsSync(okFile)) fs.writeFileSync(okFile, 'ok');
+}
+
+function existsModel() {
+  try {
+    return fs.existsSync(MODEL_TARGET) && fs.readdirSync(MODEL_TARGET).length > 0;
+  } catch { return false; }
+}
+
+// ---------------------------------------------
+// 下載相關工具（自動跟隨 302 / 續傳 / 重試）
+
+function requestWithRedirect(url, options = {}, redirCount = 0) {
+  return new Promise((resolve, reject) => {
+    const lib = url.startsWith('https') ? https : http;
+    const req = lib.request(url, options, (res) => {
+      const status = res.statusCode || 0;
+      if (status >= 300 && status < 400 && res.headers.location) {
+        if (redirCount >= MAX_REDIRECT) {
+          res.resume(); // 丟棄
+          return reject(new Error(`Too many redirects for ${url}`));
+        }
+        const next = new URL(res.headers.location, url).toString();
+        res.resume();
+        resolve(requestWithRedirect(next, options, redirCount + 1));
+        return;
+      }
+      resolve(res);
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// 以 Range 下載到檔案（可續傳）
+async function downloadRange(url, dest, onProgress) {
+  const tmp = dest + '.part';
+  const total = await getRemoteSize(url);
+  let written = 0;
+
+  // 已有暫存，續傳
+  if (fs.existsSync(tmp)) {
+    const stat = fs.statSync(tmp);
+    written = stat.size;
+    if (written > total) fs.truncateSync(tmp, 0);
+  }
+
+  const fd = fs.openSync(tmp, 'a');
+  try {
+    while (written < total) {
+      const end = Math.min(written + CHUNK_SIZE - 1, total - 1);
+      const headers = {
+        'User-Agent': 'EVI-Brush-Downloader',
+        'Accept': 'application/octet-stream',
+        'Range': `bytes=${written}-${end}`,
+      };
+      const res = await requestWithRedirect(url, { headers });
+      if (res.statusCode === 416) {
+        // 範圍不合法，視為已完成
+        break;
+      }
+      if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+        throw new Error(`HTTP ${res.statusCode}`);
+      }
+      const buf = await streamToBuffer(res);
+      fs.writeSync(fd, buf, 0, buf.length, written);
+      written += buf.length;
+      if (onProgress) onProgress(Math.min(written, total), total);
+    }
+  } finally { fs.closeSync(fd); }
+
+  fs.renameSync(tmp, dest);
+}
+
+function streamToBuffer(stream) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    stream.on('data', (d) => chunks.push(d));
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
+    stream.on('error', reject);
+  });
+}
+
+async function getRemoteSize(url) {
+  const res = await requestWithRedirect(url, {
+    method: 'HEAD',
+    headers: { 'User-Agent': 'EVI-Brush-Downloader' }
+  });
+  const len = Number(res.headers['content-length'] || 0);
+  if (!len) throw new Error(`Cannot get size for ${url}`);
+  res.resume();
+  return len;
+}
+
+// 列出 Release 的所有分割資產
+async function listReleaseAssets() {
+  const apiBase = `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/releases`;
+  const api = (RELEASE_TAG === 'latest')
+    ? `${apiBase}/latest`
+    : `${apiBase}/tags/${encodeURIComponent(RELEASE_TAG)}`;
+  const res = await requestWithRedirect(api, {
+    headers: {
+      'User-Agent': 'EVI-Brush-Downloader',
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28'
+    }
+  });
+  const body = await streamToBuffer(res);
+  const json = JSON.parse(body.toString('utf8'));
+
+  const assets = (json.assets || [])
+    .filter(a => typeof a.name === 'string' && a.name.startsWith(ASSET_PREFIX))
+    .map(a => ({ name: a.name, url: a.browser_download_url }));
+
+  // 依 .001 .002 … 排序
+  assets.sort((a, b) => {
+    const na = Number(a.name.split('.').pop());
+    const nb = Number(b.name.split('.').pop());
+    return na - nb;
+  });
+  if (!assets.length) {
+    throw new Error(`No assets matched "${ASSET_PREFIX}" on release ${RELEASE_TAG}`);
+  }
+  return assets;
+}
+
+// 重試包裝
+async function withRetry(fn, label) {
+  let lastErr;
+  for (let i = 0; i < MAX_RETRY; i++) {
+    try { return await fn(); } catch (e) { lastErr = e; }
+  }
+  throw new Error(`${label} failed after ${MAX_RETRY} retries: ${lastErr}`);
+}
+
+// 下載全部分割檔
+async function downloadAllParts(win) {
+  fs.mkdirSync(TMP_DIR, { recursive: true });
+  const assets = await listReleaseAssets();
+
+  for (const a of assets) {
+    const dest = path.join(TMP_DIR, a.name);
+    if (fs.existsSync(dest)) {
+      win?.webContents.send('dl-log', `✔ ${a.name} (exists)`);
+      continue;
+    }
+    win?.webContents.send('dl-log', `↓ ${a.name}`);
+    let lastPct = -1;
+    await withRetry(
+      () => downloadRange(a.url, dest, (w, t) => {
+        const pct = Math.floor((w / t) * 100);
+        if (pct !== lastPct) {
+          lastPct = pct;
+          win?.webContents.send('dl-progress', { file: a.name, pct });
+        }
+      }),
+      `download ${a.name}`
+    );
+  }
+  return assets.map(a => path.join(TMP_DIR, a.name));
+}
+
+// 解壓 7z 分割檔（只要給 .001，7z 會自動串其餘分割）
+async function extract7z(firstPartPath, outDir, win) {
+  const seven = resolve7z();
+  if (!seven) throw new Error('Unable to find 7-Zip (7z/7za). Please add dependency "7zip-bin" or install 7-Zip.');
+
+  fs.mkdirSync(outDir, { recursive: true });
+
+  win?.webContents.send('dl-log', 'Extracting model pack …');
+  await new Promise((resolve, reject) => {
+    const p = spawn(seven, ['x', firstPartPath, `-o${outDir}`, '-y'], {
+      stdio: isDev ? 'inherit' : 'ignore'
+    });
+    p.on('error', reject);
+    p.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`7z exit ${code}`)));
+  });
+}
+
+// ---------------------------------------------
+// 啟動流程
+
+async function ensureModel(win) {
+  ensureDirs();
+  if (existsModel()) {
+    win?.webContents.send('dl-log', 'Python bootstrap found. Model present.');
+    return;
+  }
+  win?.webContents.send('dl-log', 'Model not found. Start downloading …');
+
+  try {
+    const parts = await downloadAllParts(win);
+    // 只給 .001 就好
+    const first = parts.find(p => /\.001$/i.test(p));
+    if (!first) throw new Error('Cannot find .001 part.');
+    await extract7z(first, MODELS_ROOT, win);
+
+    // 解壓後再檢查
+    if (!existsModel()) {
+      throw new Error('Model extracted but not found at python/models/sd-turbo');
+    }
+    win?.webContents.send('dl-log', 'Model ready.');
+  } catch (err) {
+    dialog.showErrorBox('模型下載失敗', String(err && err.message || err));
+    throw err;
+  }
+}
+
+// ---------------------------------------------
+// Electron 事件
+
+function bootstrap() {
+  const win = createWindow();
+  // 前端想顯示進度可監聽 'dl-progress' / 'dl-log'
+  ensureModel(win).catch(() => { /* 已經彈錯誤框 */ });
+}
+
+app.whenReady().then(bootstrap);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
-// ====================== 工具 ======================
-function ensureDir(dir) {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  return dir;
-}
-function pad3(n) { return n.toString().padStart(3, '0'); }
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-// 組 GitHub Releases 下載 URL
-function releaseUrl(tag, filename) {
-  return `https://github.com/${GH_OWNER}/${GH_REPO}/releases/download/${tag}/${filename}`;
-}
-
-// ====================== 優先方案：BITS ======================
-// 以 Windows 內建 BITS 背景下載（可續傳、會自動重試）
-function downloadViaBITS(url, outFile) {
-  return new Promise((resolve, reject) => {
-    const ps = spawn('powershell.exe', [
-      '-NoProfile', '-Command',
-      // 1h timeout、30s 重試間隔；BITS 會自動處理暫斷
-      `Start-BitsTransfer -Source '${url}' -Destination '${outFile}' -RetryInterval 30 -RetryTimeout 3600`
-    ], { windowsHide: true });
-
-    let stderr = '';
-    ps.stderr.on('data', d => stderr += d.toString());
-    ps.on('close', code => {
-      if (code === 0 && fs.existsSync(outFile)) return resolve(outFile);
-      reject(new Error(stderr || `BITS failed (${code})`));
-    });
-  });
-}
-
-// ====================== 後備方案：HTTPS 302 + 續傳 ======================
-// 會自動跟隨 301/302/307/308，且支援 Range 續傳與重試
-function downloadWithRedirectsResume(url, outFile, opt = {}) {
-  const {
-    maxRedirects = 10,
-    tries = 10,
-    backoffFirst = 1500 // ms
-  } = opt;
-
-  return new Promise((resolve, reject) => {
-    let attempt = 0;
-
-    const doOnce = (currentUrl, redirectsLeft) => {
-      attempt++;
-
-      // 續傳：若已存在，從 size 接續
-      const exists = fs.existsSync(outFile);
-      const startAt = exists ? fs.statSync(outFile).size : 0;
-      const headers = {
-        'User-Agent': 'EVI-Brush-Desktop',
-      };
-      if (startAt > 0) headers['Range'] = `bytes=${startAt}-`;
-
-      const req = https.request(currentUrl, { method: 'GET', headers }, res => {
-        const code = res.statusCode || 0;
-
-        // 重定向
-        if ([301, 302, 303, 307, 308].includes(code) && res.headers.location) {
-          if (redirectsLeft <= 0) return reject(new Error('Too many redirects'));
-          const next = new URL(res.headers.location, currentUrl).toString();
-          req.destroy();
-          return doOnce(next, redirectsLeft - 1);
-        }
-
-        // 成功（200 或 206）
-        if ([200, 206].includes(code)) {
-          ensureDir(path.dirname(outFile));
-          const ws = fs.createWriteStream(outFile, { flags: startAt > 0 ? 'a' : 'w' });
-
-          let downloaded = startAt;
-          const total = (() => {
-            const len = +res.headers['content-length'] || 0;
-            // 206 時總長度在 content-range，例如 "bytes 123-999/1000"
-            const cr = res.headers['content-range'];
-            if (cr && /\/(\d+)$/.test(cr)) return parseInt(RegExp.$1, 10);
-            return startAt + len;
-          })();
-
-          res.on('data', chunk => {
-            downloaded += chunk.length;
-            ws.write(chunk);
-            // 進度事件（可在 renderer 顯示）
-            app?.emit?.('model-progress', { url: currentUrl, downloaded, total });
-          });
-
-          res.on('end', () => {
-            ws.end();
-            resolve(outFile);
-          });
-
-          res.on('error', err => {
-            ws.close();
-            reject(err);
-          });
-
-          return;
-        }
-
-        // 其他錯誤碼
-        reject(new Error(`HTTP ${code}`));
-      });
-
-      req.on('error', async (err) => {
-        if (attempt >= tries) return reject(err);
-        const wait = backoffFirst * Math.pow(1.6, attempt - 1);
-        await sleep(wait);
-        doOnce(currentUrl, redirectsLeft);
-      });
-
-      req.end();
-    };
-
-    doOnce(url, maxRedirects);
-  });
-}
-
-// 統一的下載器（先 BITS -> 後備 HTTPS）
-async function smartDownload(url, outFile) {
-  try {
-    return await downloadViaBITS(url, outFile);
-  } catch (e) {
-    // BITS 失敗再退回自帶下載器（可處理 302 與續傳）
-    return await downloadWithRedirectsResume(url, outFile, { tries: 12 });
-  }
-}
-
-// ====================== 解壓 7z 分割檔 ======================
-function extract7zSplit(firstPartPath, outDir) {
-  return new Promise((resolve, reject) => {
-    ensureDir(outDir);
-    const seven = sevenBin.path7za; // 內建跨平台 7z 可執行檔
-    const child = spawn(seven, ['x', '-y', firstPartPath, `-o${outDir}`], { windowsHide: true });
-
-    let stderr = '';
-    child.stderr.on('data', d => stderr += d.toString());
-    child.on('close', code => {
-      if (code === 0) resolve();
-      else reject(new Error(stderr || `7z exit ${code}`));
-    });
-  });
-}
-
-// ====================== IPC：檢查 pbs、下載模型 ======================
+// 提供給 Renderer 簡單查詢
 ipcMain.handle('check-pbs', async () => {
-  try {
-    const p = path.join(process.resourcesPath, 'python', 'pbs');
-    return fs.existsSync(p) ? 'ok' : 'missing';
-  } catch {
-    return 'missing';
-  }
-});
-
-/**
- * 下載模型（GitHub Releases 分割檔）
- * @param {{tag:string, parts:number, base?:string}} payload
- *   tag   : 例如 'v73'
- *   parts : 分割片數（例如 5）
- *   base  : 基底檔名（預設 'model-pack.7z'，會自動組 .001 ~ .NNN）
- * @returns {Promise<{ok:boolean, message?:string}>}
- */
-ipcMain.handle('model.download', async (_evt, payload) => {
-  const tag   = payload?.tag || 'latest';
-  const parts = Math.max(1, +payload?.parts || 1);
-  const base  = payload?.base || 'model-pack.7z';
-
-  const userTmp = ensureDir(path.join(app.getPath('userData'), 'model-tmp'));
-  const outModels = ensureDir(path.join(process.resourcesPath, 'python', 'models'));
-
-  try {
-    // 產生分割檔 URL 與本機路徑
-    const tasks = [];
-    for (let i = 1; i <= parts; i++) {
-      const p3 = pad3(i);
-      const filename = `${base}.${p3}`;
-      const url = releaseUrl(tag, filename);
-      const out = path.join(userTmp, filename);
-      tasks.push({ url, out });
-    }
-
-    // 下載（逐一，穩定度高；如需併發可自行改 PromisePool）
-    for (const t of tasks) {
-      app.emit('model-progress', { url: t.url, downloaded: 0, total: 0 });
-      await smartDownload(t.url, t.out);
-      app.emit('model-progress', { url: t.url, downloaded: 1, total: 1 }); // 單檔完成訊號
-    }
-
-    // 解壓：使用第一片 .001
-    const first = path.join(userTmp, `${base}.001`);
-    await extract7zSplit(first, outModels);
-
-    // 清理暫存
-    try { fs.rmSync(userTmp, { recursive: true, force: true }); } catch {}
-
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, message: String(err?.message || err) };
-  }
-});
-
-// ====================== 將進度轉發給前端（可選） ======================
-app.on('model-progress', (info) => {
-  const wins = BrowserWindow.getAllWindows();
-  for (const w of wins) {
-    w.webContents.send('download-progress', info);
-  }
+  try { return fs.existsSync(path.join(PBS_DIR, 'ok')) ? 'ok' : 'missing'; }
+  catch { return 'missing'; }
 });
