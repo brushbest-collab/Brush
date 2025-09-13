@@ -1,197 +1,195 @@
-// main.js
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+// ===== main.js (完整覆蓋) =====
+const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
-const { spawn } = require('child_process');
-
-const OWNER = 'brushbest-collab';      // ← 如模型分卷在別的 repo，改這裡
-const REPO  = 'Brush';
-const UA    = 'EVI-Brush-Desktop/1.0';
+const { spawn, execFileSync } = require('child_process');
+const sevenBin = require('7zip-bin');
 
 const isDev = !app.isPackaged;
 
-function getAppRoot() { return isDev ? app.getAppPath() : process.resourcesPath; }
-function ensureDir(p) { fs.mkdirSync(p, { recursive: true }); }
-function existsDirNonEmpty(p) {
-  try { return fs.existsSync(p) && fs.statSync(p).isDirectory() && fs.readdirSync(p).length > 0; }
-  catch { return false; }
-}
-
-let win;
-async function createWindow() {
-  win = new BrowserWindow({
-    width: 1100, height: 720,
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true }
+// =============== 視窗 ===============
+function create() {
+  const win = new BrowserWindow({
+    width: 1024,
+    height: 700,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true
+    }
   });
-  await win.loadFile(path.join(__dirname, 'index.html'));
+  win.loadFile(path.join(__dirname, 'index.html'));
   if (isDev) win.webContents.openDevTools({ mode: 'detach' });
 }
-app.whenReady().then(createWindow);
+app.whenReady().then(create);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
-/* ---------------- GitHub：抓分卷清單 ---------------- */
-function ghGetJson(url) {
-  return new Promise((resolve, reject) => {
-    const req = https.request(url, { method:'GET', headers:{ 'User-Agent':UA, 'Accept':'application/vnd.github+json' } }, res => {
-      let buf=''; res.setEncoding('utf8');
-      res.on('data', d => buf += d);
-      res.on('end', () => {
-        if (res.statusCode>=200 && res.statusCode<300) { try{ resolve(JSON.parse(buf)); }catch(e){ reject(e);} }
-        else reject(new Error(`GitHub API ${res.statusCode}: ${url}\n${buf.slice(0,400)}`));
-      });
-    });
-    req.on('error', reject); req.end();
-  });
-}
-async function listModelAssets(tag) {
-  const api = tag && tag.trim()
-    ? `https://api.github.com/repos/${OWNER}/${REPO}/releases/tags/${encodeURIComponent(tag.trim())}`
-    : `https://api.github.com/repos/${OWNER}/${REPO}/releases/latest`;
-  const json = await ghGetJson(api);
-  const assets = (json.assets || []).filter(a => /^model-pack\.7z\.\d{3}$/i.test(a.name));
-  assets.sort((a,b)=>parseInt(a.name.split('.').pop(),10)-parseInt(b.name.split('.').pop(),10));
-  return assets.map(a => ({ name:a.name, size:a.size, url:a.browser_download_url }));
-}
+// =============== 路徑與檢查工具 ===============
+const DEFAULT_D_DIR = 'D:\\EVI-Brush\\models\\sd-turbo';
 
-/* ---------------- 下載（支援 302/續傳/416） ---------------- */
-function downloadFollow(url, dest, onProgress, headers={}) {
-  return new Promise((resolve, reject) => {
-    const req = https.request(url, { method:'GET', headers:{ 'User-Agent':UA, ...headers } }, res => {
-      const code = res.statusCode || 0;
-      if ([301,302,303,307,308].includes(code) && res.headers.location) {
-        const next = res.headers.location.startsWith('http') ? res.headers.location : new URL(res.headers.location, url).toString();
-        res.resume(); return resolve(downloadFollow(next, dest, onProgress, headers));
-      }
-      if (code===200 || code===206) {
-        const out = fs.createWriteStream(dest, { flags: headers.Range ? 'a' : 'w' });
-        let rec = 0, total = parseInt(res.headers['content-length'] || '0',10);
-        res.on('data', ch => { rec += ch.length; out.write(ch); onProgress && onProgress(rec, total); });
-        res.on('end', () => out.end(resolve));
-        res.on('error', e => { out.close(()=>reject(e)); });
-        return;
-      }
-      if (code===416) { res.resume(); return resolve(); } // 視為已完成
-      res.resume(); reject(new Error(`HTTP ${code} for ${url}`));
-    });
-    req.on('error', reject); req.end();
-  });
-}
-async function downloadOneWithResume(asset, dest, send) {
-  if (fs.existsSync(dest) && fs.statSync(dest).size === asset.size) return;
-  let start = fs.existsSync(dest) ? fs.statSync(dest).size : 0;
-  const headers = start>0 ? { Range:`bytes=${start}-` } : {};
-  await downloadFollow(asset.url, dest, (r,t) => {
-    const done = start + r, tot = start + (t||0);
-    send('dl-progress', { file: path.basename(dest), received: done, total: tot });
-  }, headers);
-  const now = fs.statSync(dest).size;
-  if (now !== asset.size) { // server 忽略 Range → 重下
-    send('log', `重新下載：${path.basename(dest)}`);
-    await downloadFollow(asset.url, dest, (r,t)=>send('dl-progress',{file:path.basename(dest),received:r,total:t||asset.size}), {});
+// 優先用 D 槽固定路徑；若不可用則回退 userData
+function resolveModelDir() {
+  const envOverride = process.env.EVI_MODEL_DIR; // 你也可用環境變數手動指定
+  if (envOverride && ensureWritableDir(envOverride)) return envOverride;
+
+  if (isWindowsDriveExists('D:')) {
+    // D 槽存在 → 試著用 D 槽
+    if (ensureWritableDir(DEFAULT_D_DIR)) return DEFAULT_D_DIR;
   }
+  // 回退到使用者資料夾
+  const fallback = path.join(app.getPath('userData'), 'models', 'sd-turbo');
+  ensureWritableDir(fallback);
+  return fallback;
 }
 
-/* ---------------- 解壓 7z ---------------- */
-function find7z() {
-  const cand = [
-    path.join(getAppRoot(),'bin','7za.exe'),
-    'C:\\Program Files\\7-Zip\\7z.exe',
-    'C:\\Program Files (x86)\\7-Zip\\7z.exe',
-    '7z'
-  ];
-  for (const p of cand) { try { if (p.includes('\\')) { if (fs.existsSync(p)) return p; } } catch{} }
-  return cand[cand.length-1];
-}
-function extract7z(firstPartPath, outDir, send) {
-  return new Promise((resolve, reject) => {
-    const seven = find7z(); ensureDir(outDir);
-    send('log', `使用 7z：${seven}`);
-    const child = spawn(seven, ['x','-y', firstPartPath, `-o${outDir}`], { windowsHide:true });
-    child.stdout.on('data', d => send('log', d.toString()));
-    child.stderr.on('data', d => send('log', d.toString()));
-    child.on('close', code => code===0 ? resolve() : reject(new Error(`7z exit ${code}`)));
-  });
-}
-
-/* ---------------- IPC：環境/下載/設定 ---------------- */
-ipcMain.handle('env-check', async () => {
-  const root   = getAppRoot();
-  const pbsDir = path.join(root,'python','pbs');
-  const mdlDir = path.join(root,'python','models','sd-turbo');
-  const hasPbs   = fs.existsSync(path.join(pbsDir,'ok'));
-  const hasModel = existsDirNonEmpty(mdlDir);
-  return { root, hasPbs, hasModel };
-});
-
-ipcMain.handle('download-model', async (evt, { tag }) => {
-  const send = (ch, payload) => { try { evt.sender.send(ch, payload); } catch {} };
-  const root  = getAppRoot();
-  const cache = path.join(root,'python','models','.cache');
-  const out   = path.join(root,'python','models');
-  ensureDir(cache);
-
-  send('log', `查詢 Release（${tag ? tag : 'latest'}）...`);
-  const assets = await listModelAssets(tag);
-  if (!assets.length) throw new Error('Release 中找不到 model-pack.7z.### 分卷');
-  send('log', `找到 ${assets.length} 個分卷，開始下載…`);
-
-  for (let i=0;i<assets.length;i++){
-    const a = assets[i], dest = path.join(cache, a.name);
-    send('log', `下載 ${i+1}/${assets.length}：${a.name}（${(a.size/1048576).toFixed(1)} MB）`);
-    await downloadOneWithResume(a, dest, send);
-  }
-  const first = path.join(cache, 'model-pack.7z.001');
-  if (!fs.existsSync(first)) throw new Error('缺少第一卷 model-pack.7z.001');
-
-  send('state', { phase:'extract' });
-  send('log','全部分卷已就緒，開始解壓…');
-  await extract7z(first, out, send);
-  send('log','解壓完成。');
-  return { ok:true };
-});
-
-/* ---------- 設定存取：userData/settings.json ---------- */
-function settingsPath() { return path.join(app.getPath('userData'), 'settings.json'); }
-function defaultSettings() {
-  const outDefault = path.join(app.getPath('documents'), 'EVI-Brush-Outputs');
-  return {
-    prompt: '',
-    negativePrompt: '',
-    width: 1024,
-    height: 1024,
-    steps: 4,
-    guidance: 2.0,
-    seed: -1,
-    batch: 1,
-    outDir: outDefault
-  };
-}
-ipcMain.handle('settings:get', async () => {
+// 嘗試建立資料夾並測試可寫
+function ensureWritableDir(dir) {
   try {
-    const p = settingsPath();
-    if (!fs.existsSync(p)) {
-      const d = defaultSettings(); ensureDir(d.outDir);
-      fs.writeFileSync(p, JSON.stringify(d, null, 2));
-      return d;
-    }
-    const d = JSON.parse(fs.readFileSync(p, 'utf8'));
-    if (d.outDir) ensureDir(d.outDir);
-    return { ...defaultSettings(), ...d };
+    fs.mkdirSync(dir, { recursive: true });
+    const test = path.join(dir, '.__wtest');
+    fs.writeFileSync(test, 'ok');
+    fs.rmSync(test, { force: true });
+    return true;
   } catch {
-    const d = defaultSettings(); ensureDir(d.outDir); return d;
+    return false;
   }
+}
+
+function isWindowsDriveExists(rootLikeD) {
+  try { return fs.existsSync(rootLikeD + '\\'); } catch { return false; }
+}
+
+// 暫存位置：放 7z 分卷
+function getTempDir() {
+  const tmp = path.join(app.getPath('temp'), 'evi-brush-tmp');
+  fs.mkdirSync(tmp, { recursive: true });
+  return tmp;
+}
+
+// 清理暫存分卷
+function cleanTemp() {
+  const d = getTempDir();
+  if (!fs.existsSync(d)) return;
+  try {
+    for (const f of fs.readdirSync(d)) {
+      if (f.startsWith('model-pack.7z.')) {
+        try { fs.rmSync(path.join(d, f), { force: true }); } catch {}
+      }
+    }
+  } catch {}
+}
+
+// 取得某路徑所在磁碟剩餘空間（Bytes）
+function getFreeBytesFor(p) {
+  if (process.platform !== 'win32') return 0; // 這裡只針對 Windows
+  const drive = path.parse(p).root.replace(/\\$/, ''); // e.g. "D:"
+  try {
+    const out = execFileSync('powershell.exe',
+      ['-NoProfile','-Command', `(Get-PSDrive -Name ${drive.replace(':','')}).Free`],
+      { encoding: 'utf8' }
+    ).trim();
+    const n = Number(out);
+    return Number.isFinite(n) ? n : 0;
+  } catch { return 0; }
+}
+
+// =============== 下載（支援 302 + Range 續傳） ===============
+function downloadWithResume(url, dest, onProgress) {
+  return new Promise((resolve, reject) => {
+    const startAt = fs.existsSync(dest) ? fs.statSync(dest).size : 0;
+    const req = https.request(url, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'EVI-Brush-Desktop/1.0',
+        ...(startAt > 0 ? { 'Range': `bytes=${startAt}-` } : {})
+      }
+    }, res => {
+      // 追隨重新導向
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        return resolve(downloadWithResume(res.headers.location, dest, onProgress));
+      }
+      if (res.statusCode !== 200 && res.statusCode !== 206)
+        return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+
+      const total = Number(res.headers['content-length'] || 0) + startAt;
+      let loaded = startAt;
+
+      const ws = fs.createWriteStream(dest, { flags: startAt > 0 ? 'a' : 'w' });
+      res.on('data', chunk => {
+        loaded += chunk.length;
+        if (typeof onProgress === 'function') onProgress({ url, loaded, total });
+      });
+      res.pipe(ws);
+      ws.on('finish', () => ws.close(resolve));
+      ws.on('error', reject);
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// 7z：由 001 自動解完整分卷
+function extract7z001To(targetDir, head001) {
+  return new Promise((resolve, reject) => {
+    const seven = sevenBin.path7za; // 內建 7za.exe
+    const args  = ['x', '-y', '-aoa', `-o${targetDir}`, head001];
+    const p = spawn(seven, args, { stdio: ['ignore','pipe','pipe'] });
+
+    let out = '', err = '';
+    p.stdout.on('data', d => { out += d.toString(); });
+    p.stderr.on('data', d => { err += d.toString(); });
+    p.on('close', code => {
+      if (code === 0) return resolve();
+      reject(new Error(`7z exit ${code}\n${out}\n${err}`));
+    });
+  });
+}
+
+// =============== IPC：提供前端呼叫 ===============
+
+// 回傳實際模型安裝路徑（給 UI 顯示）
+ipcMain.handle('get-model-dir', async () => resolveModelDir());
+
+// 下載 + 解壓模型
+// 參數格式：{ assets: [{ name, browser_download_url }, ...], assumedTotalGB?: number }
+ipcMain.handle('download-model', async (_evt, { assets = [], assumedTotalGB = 40 }) => {
+  if (!assets.length) throw new Error('找不到可下載的模型分卷清單。');
+
+  const modelDir = resolveModelDir();     // 優先 D 槽
+  const tempDir  = getTempDir();
+
+  // 檢查目標磁碟空間：使用估算值（可自行改成總 Content-Length × 1.1）
+  const needBytes = Math.max(assumedTotalGB, 40) * 1024 * 1024 * 1024; // 至少 40GB
+  const freeBytes = getFreeBytesFor(modelDir);
+  if (freeBytes > 0 && freeBytes < needBytes) {
+    throw new Error(`目標磁碟（${path.parse(modelDir).root}）剩餘 ${(freeBytes/1e9).toFixed(1)} GB，不足 ${(needBytes/1e9).toFixed(0)} GB。請改路徑或釋放空間。`);
+  }
+
+  // 1) 清除舊暫存
+  cleanTemp();
+
+  // 2) 逐一下載分卷到 tempDir
+  for (const a of assets) {
+    const url  = a.browser_download_url || a.url || a;
+    const name = a.name || path.basename(url);
+    const to   = path.join(tempDir, name);
+    await downloadWithResume(url, to); // 如需顯示進度，可傳 onProgress
+  }
+
+  // 3) 確認頭卷存在
+  const head = path.join(tempDir, 'model-pack.7z.001');
+  if (!fs.existsSync(head)) throw new Error('找不到 model-pack.7z.001，請確認 Release 資產完整。');
+
+  // 4) 先清空目標資料夾（避免殘檔/權限）
+  try { fs.rmSync(modelDir, { recursive: true, force: true }); } catch {}
+  fs.mkdirSync(modelDir, { recursive: true });
+
+  // 5) 解壓全部分卷到 modelDir
+  await extract7z001To(modelDir, head);
+
+  // 6) 成功 → 刪暫存
+  cleanTemp();
+
+  return { ok: true, modelDir };
 });
-ipcMain.handle('settings:set', async (_evt, data) => {
-  const cur = await ipcMain.emit; // no-op to silence lints
-  const merged = { ...defaultSettings(), ...(data||{}) };
-  if (merged.outDir) ensureDir(merged.outDir);
-  fs.writeFileSync(settingsPath(), JSON.stringify(merged, null, 2));
-  return true;
-});
-ipcMain.handle('dialog:choose-dir', async () => {
-  const r = await dialog.showOpenDialog({ properties:['openDirectory','createDirectory'] });
-  if (r.canceled || !r.filePaths?.length) return null;
-  return r.filePaths[0];
-});
-ipcMain.handle('open:path', async (_e, p) => { if (p) { await shell.openPath(p); } return true; });
