@@ -14,7 +14,7 @@
     button:disabled { opacity: .5; cursor: not-allowed; }
     #bar { height: 10px; background: #e9ecef; margin: 12px 0; position: relative; border-radius: 6px; overflow: hidden; }
     #bar>div { position: absolute; left: 0; top: 0; bottom: 0; width: 0%; background: #3b82f6; transition: width .15s linear; }
-    #log { width: 100%; height: 300px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 13px; background: #111; color: #9f9; border: none; border-radius: 6px; padding: 10px; box-sizing: border-box; }
+    #log { width: 100%; height: 300px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; background: #111; color: #9f9; border: none; border-radius: 6px; padding: 10px; box-sizing: border-box; }
   </style>
 </head>
 <body>
@@ -22,7 +22,8 @@
   <div id="status" class="muted">Checking...</div>
 
   <div id="actions" style="margin-top:16px; display:none;">
-    <button id="btn" title="自動續傳 / 302 兼容">下載模型（自動續傳 / 302 兼容）</button>
+    <button id="btnDl" title="自動續傳 / 302 兼容">下載模型（自動續傳 / 302 兼容）</button>
+    <button id="btnSettings" style="display:none">前往設定</button>
   </div>
 
   <div id="bar" style="display:none;"><div></div></div>
@@ -30,70 +31,47 @@
 
   <script>
     const $status = document.getElementById('status');
-    const $btn    = document.getElementById('btn');
+    const $dl     = document.getElementById('btnDl');
+    const $go     = document.getElementById('btnSettings');
     const $acts   = document.getElementById('actions');
     const $bar    = document.getElementById('bar');
     const $barIn  = $bar.firstElementChild;
     const $log    = document.getElementById('log');
 
-    function log(s) {
-      if ($log.style.display === 'none') $log.style.display = 'block';
-      $log.value += (s + '\n');
-      $log.scrollTop = $log.scrollHeight;
-    }
+    function log(s){ if($log.style.display==='none') $log.style.display='block'; $log.value+=s+'\\n'; $log.scrollTop=$log.scrollHeight; }
+    function setProgress(p){ $bar.style.display='block'; $barIn.style.width = p + '%'; }
 
-    function setProgress(p) {
-      $bar.style.display = 'block';
-      $barIn.style.width = p + '%';
-    }
-
-    async function init() {
+    async function init(){
       const env = await window.EVI.check();
-
-      const hasPbs = env.hasPbs;
-      const hasModel = env.hasModel;
-
-      if (!hasPbs) {
-        $status.innerHTML = '<span class="err">Python bootstrap not found（請確認安裝包是否完整）</span>';
-        return;
-      }
-
-      if (hasModel) {
-        $status.innerHTML = '<span class="ok">Python bootstrap found. 模型已安裝。</span>';
+      if (!env.hasPbs) { $status.innerHTML = '<span class="err">Python bootstrap not found（請確認安裝包是否完整）</span>'; return; }
+      if (env.hasModel) {
+        $status.innerHTML = '<span class="ok">模型已安裝。</span>';
+        $acts.style.display = 'block';
+        $dl.style.display = 'none';
+        $go.style.display = 'inline-block';
       } else {
-        $status.innerHTML = '<span class="warn">Python bootstrap found. 模型未安裝。</span>';
+        $status.innerHTML = '<span class="warn">模型未安裝。</span>';
         $acts.style.display = 'block';
       }
     }
 
-    $btn.addEventListener('click', async () => {
-      $btn.disabled = true;
-      log('開始下載（自動續傳 / 302 兼容）…');
+    window.EVI.onProgress(p => { if (p.total>0){ setProgress(Math.floor(p.received*100/p.total)); } });
+    window.EVI.onLog(s => log(String(s).trimEnd()));
+    window.EVI.onState(s => { if (s.phase==='extract') log('開始解壓…'); });
+
+    $dl.addEventListener('click', async ()=>{
+      $dl.disabled = true; setProgress(0); log('開始下載…');
       try {
         await window.EVI.downloadModel('');
-        log('✅ 模型就緒！');
-        setProgress(100);
-        const s = document.getElementById('status');
-        s.innerHTML = '<span class="ok">全部模型分卷下載完畢並解壓完成。</span>';
-      } catch (err) {
-        console.error(err);
-        log('❌ 下載/解壓發生錯誤：' + (err?.message || err));
-        $btn.disabled = false;
+        log('✅ 模型就緒！'); setProgress(100);
+        $status.innerHTML = '<span class="ok">全部分卷下載並解壓完成。</span>';
+        $dl.style.display = 'none'; $go.style.display = 'inline-block';
+      } catch (e) {
+        log('❌ 下載/解壓錯誤：' + (e?.message || e)); $dl.disabled = false;
       }
     });
 
-    // 進度/狀態事件
-    window.EVI.onProgress(p => {
-      if (p.total && p.total > 0) {
-        const pct = Math.max(0, Math.min(100, Math.floor((p.received / p.total) * 100)));
-        setProgress(pct);
-      }
-    });
-    window.EVI.onLog(s => log(String(s).trimEnd()));
-    window.EVI.onState(s => {
-      if (s.phase === 'extract') log('開始解壓…');
-    });
-
+    $go.addEventListener('click', ()=>{ window.location.replace('settings.html'); });
     init();
   </script>
 </body>
