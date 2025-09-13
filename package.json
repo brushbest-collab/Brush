@@ -8,11 +8,10 @@
   "scripts": {
     "start": "electron .",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder --win --x64 --publish never"
+    "dist": "electron-builder --win nsis portable --x64 --publish never"
   },
   "dependencies": {
-    "electron-updater": "^6.1.7",
-    "7zip-bin": "^5.2.0"
+    "electron-updater": "^6.1.7"
   },
   "devDependencies": {
     "electron": "^30.0.0",
@@ -29,7 +28,6 @@
       "preload.js",
       "index.html",
       "build/**",
-      "!python/venv/**",
       "!**/*.log",
       "!**/*.md",
       "!.git/**",
@@ -37,19 +35,17 @@
     ],
     "extraResources": [
       { "from": "python/pbs", "to": "python/pbs" },
-      { "from": "python/models", "to": "python/models", "filter": ["**/*"] }
+      { "from": "python/models", "to": "python/models", "filter": ["**/*"] },
+      { "from": "bin/7za.exe", "to": "bin/7za.exe" }
     ],
     "asar": true,
-    "asarUnpack": ["python/**"],
+    "asarUnpack": [
+      "python/**",
+      "bin/**"
+    ],
     "win": {
       "icon": "build/icon.ico",
-      "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
-      ]
-    },
-    "portable": {
-      "artifactName": "${productName}-${version}-x64-portable.${ext}"
+      "target": ["nsis", "portable"]
     },
     "nsis": {
       "oneClick": true,
