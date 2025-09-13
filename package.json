@@ -20,13 +20,12 @@
   "build": {
     "appId": "com.evi.brush.desktop",
     "productName": "EVI Brush Desktop",
-    "directories": {
-      "output": "dist"
-    },
+    "directories": { "output": "dist" },
     "files": [
       "main.js",
       "preload.js",
       "index.html",
+      "settings.html",
       "build/**",
       "!**/*.log",
       "!**/*.md",
@@ -39,10 +38,7 @@
       { "from": "bin/7za.exe", "to": "bin/7za.exe" }
     ],
     "asar": true,
-    "asarUnpack": [
-      "python/**",
-      "bin/**"
-    ],
+    "asarUnpack": ["python/**","bin/**"],
     "win": {
       "icon": "build/icon.ico",
       "target": ["nsis", "portable"]
