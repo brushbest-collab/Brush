@@ -1,78 +1,121 @@
 <!doctype html>
-<html lang="zh-Hant">
+<html>
 <head>
   <meta charset="utf-8" />
   <title>EVI Brush Desktop</title>
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans TC", Arial, "Microsoft JhengHei", sans-serif; margin: 24px; }
-    h1 { margin: 0 0 18px; font-size: 42px; }
-    .muted { color: #666; }
-    .ok { color: #22863a; }
-    .warn { color: #B36B00; }
-    .err { color: #cc0000; }
-    button { font-size: 16px; padding: 10px 16px; border-radius: 6px; border: 1px solid #bbb; background: #f6f8fa; cursor: pointer; }
-    button:disabled { opacity: .5; cursor: not-allowed; }
-    #bar { height: 10px; background: #e9ecef; margin: 12px 0; position: relative; border-radius: 6px; overflow: hidden; }
-    #bar>div { position: absolute; left: 0; top: 0; bottom: 0; width: 0%; background: #3b82f6; transition: width .15s linear; }
-    #log { width: 100%; height: 300px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; background: #111; color: #9f9; border: none; border-radius: 6px; padding: 10px; box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, "Microsoft JhengHei", sans-serif; margin: 24px; }
+    h1 { font-size: 42px; margin: 0 0 16px; }
+    .muted { color:#666; }
+    .row { margin: 14px 0; }
+    button { padding: 8px 14px; font-size: 14px; }
+    #log { width:100%; height:260px; background:#111; color:#9f9; padding:10px; overflow:auto; white-space: pre; }
+    #prog { width: 96%; height: 10px; background: #e6e6e6; margin: 12px 0; border-radius: 5px; position: relative; }
+    #bar { height: 100%; width: 0%; background: #3b82f6; border-radius: 5px; transition: width .2s; }
   </style>
 </head>
 <body>
   <h1>EVI Brush Desktop</h1>
-  <div id="status" class="muted">Checking...</div>
+  <div id="status" class="muted">Checking…</div>
 
-  <div id="actions" style="margin-top:16px; display:none;">
-    <button id="btnDl" title="自動續傳 / 302 兼容">下載模型（自動續傳 / 302 兼容）</button>
-    <button id="btnSettings" style="display:none">前往設定</button>
+  <div id="actions" style="display:none;">
+    <div class="row">
+      <button id="btnChoose">選擇模型資料夾</button>
+      <span id="modelRoot" class="muted"></span>
+    </div>
+    <div id="prog"><div id="bar"></div></div>
+    <div class="row">
+      <button id="btnDownload">下載模型（自動續傳 / 302 兼容）</button>
+    </div>
+    <div class="row">
+      <button id="btnOpenGen" disabled>開啟設計 / 生成頁</button>
+    </div>
+    <div class="row">
+      <div id="log"></div>
+    </div>
   </div>
 
-  <div id="bar" style="display:none;"><div></div></div>
-  <textarea id="log" style="display:none;" readonly></textarea>
-
   <script>
-    const $status = document.getElementById('status');
-    const $dl     = document.getElementById('btnDl');
-    const $go     = document.getElementById('btnSettings');
-    const $acts   = document.getElementById('actions');
-    const $bar    = document.getElementById('bar');
-    const $barIn  = $bar.firstElementChild;
-    const $log    = document.getElementById('log');
+    const $ = (s)=>document.querySelector(s);
+    const statusEl = $('#status');
+    const actions = $('#actions');
+    const modelRootEl = $('#modelRoot');
+    const bar = $('#bar');
+    const logEl = $('#log');
 
-    function log(s){ if($log.style.display==='none') $log.style.display='block'; $log.value+=s+'\\n'; $log.scrollTop=$log.scrollHeight; }
-    function setProgress(p){ $bar.style.display='block'; $barIn.style.width = p + '%'; }
+    const log = (msg='') => { 
+      const line = `[ui] ${new Date().toLocaleTimeString()} ${msg}\n`;
+      logEl.textContent += line; 
+      logEl.scrollTop = logEl.scrollHeight;
+      window.evi?.log?.(msg);
+    };
 
-    async function init(){
-      const env = await window.EVI.check();
-      if (!env.hasPbs) { $status.innerHTML = '<span class="err">Python bootstrap not found（請確認安裝包是否完整）</span>'; return; }
-      if (env.hasModel) {
-        $status.innerHTML = '<span class="ok">模型已安裝。</span>';
-        $acts.style.display = 'block';
-        $dl.style.display = 'none';
-        $go.style.display = 'inline-block';
-      } else {
-        $status.innerHTML = '<span class="warn">模型未安裝。</span>';
-        $acts.style.display = 'block';
+    function showState(s) {
+      console.log('state:', s);
+      log(`state received: bootstrap=${s?.bootstrap?.ok}, modelRoot=${s?.modelRoot}`);
+      modelRootEl.textContent = s?.modelRoot || '';
+      if (!s?.bootstrap?.ok) {
+        statusEl.innerHTML = 'Python bootstrap not found（請確認安裝包是否完整）';
+        actions.style.display = 'block';
+        $('#btnOpenGen').disabled = true;
+        return;
       }
+      statusEl.textContent = 'Python bootstrap found. 模型未安裝。';
+      actions.style.display = 'block';
+      // 這裡你可以檢查模型是否已存在，存在就啟用生成頁
+      $('#btnOpenGen').disabled = false;
     }
 
-    window.EVI.onProgress(p => { if (p.total>0){ setProgress(Math.floor(p.received*100/p.total)); } });
-    window.EVI.onLog(s => log(String(s).trimEnd()));
-    window.EVI.onState(s => { if (s.phase==='extract') log('開始解壓…'); });
+    // Watchdog：5 秒內沒有任何狀態，就提醒
+    let watchdog = setTimeout(()=>{
+      statusEl.innerHTML = '仍在 Checking… 如果長時間無反應，請打開開發者工具（Ctrl+Shift+I）檢查 console 錯誤。';
+      log('watchdog: no state within 5s');
+    }, 5000);
 
-    $dl.addEventListener('click', async ()=>{
-      $dl.disabled = true; setProgress(0); log('開始下載…');
+    // 拉一次狀態 + 訂閱 push
+    (async () => {
       try {
-        await window.EVI.downloadModel('');
-        log('✅ 模型就緒！'); setProgress(100);
-        $status.innerHTML = '<span class="ok">全部分卷下載並解壓完成。</span>';
-        $dl.style.display = 'none'; $go.style.display = 'inline-block';
+        const s = await window.evi.getState();
+        clearTimeout(watchdog);
+        showState(s);
       } catch (e) {
-        log('❌ 下載/解壓錯誤：' + (e?.message || e)); $dl.disabled = false;
+        console.error(e);
+        log('getState failed: '+e);
+      }
+      const off = window.evi.onState((s) => {
+        clearTimeout(watchdog);
+        showState(s);
+      });
+      window.addEventListener('beforeunload', off);
+    })();
+
+    // UI handlers（下載模型流程請接你前面的 downloader；此處只放占位與進度條示範）
+    $('#btnChoose').addEventListener('click', async () => {
+      const r = await window.evi.chooseModelDir();
+      if (!r?.canceled && r?.modelRoot) {
+        modelRootEl.textContent = r.modelRoot;
+        log('模型根目錄：'+r.modelRoot);
       }
     });
 
-    $go.addEventListener('click', ()=>{ window.location.replace('settings.html'); });
-    init();
+    $('#btnDownload').addEventListener('click', async () => {
+      log('開始下載模型（示範用）');
+      // 示範進度條（這裡請串接你的真正下載流程）
+      let p = 0;
+      const t = setInterval(()=>{
+        p = Math.min(100, p+5);
+        bar.style.width = p + '%';
+        if (p === 100) {
+          clearInterval(t);
+          log('示範下載完成');
+        }
+      }, 150);
+    });
+
+    $('#btnOpenGen').addEventListener('click', () => {
+      log('TODO: 進入生成頁（尚未實作路由）');
+      alert('生成頁示範：這裡接你的鞋款設計 / Prompt UI。');
+    });
   </script>
 </body>
 </html>
