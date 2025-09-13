@@ -1,11 +1,25 @@
-name: Release (App + Model, split)
+name: Release (App + Model, 900MB split)
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (ex: v73). 留空則自動產生 v{run_number}'
+        required: false
+        default: ''
+      prerelease:
+        description: '是否當作 Pre-release'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   release-windows:
     runs-on: windows-latest
+
+    env:
+      NODE_OPTIONS: --max_old_space_size=4096
+      HF_ENDPOINT: https://huggingface.co
 
     steps:
       - name: Checkout
@@ -27,8 +41,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 建立 python\pbs 與模型資料夾（穩健）
-      - name: Ensure python/pbs & model folders (safe)
+      - name: Ensure pbs & model folders (safe)
         shell: pwsh
         run: |
           $root   = (Get-Location).Path
@@ -38,44 +51,48 @@ jobs:
           foreach ($d in @($pyDir,$pbsDir,$mdlDir)) {
             if (Test-Path $d) {
               $it = Get-Item $d -ErrorAction SilentlyContinue
-              if ($it -and -not $it.PSIsContainer) { Remove-Item $d -Force }
+              if ($it -and -not $it.PSIsContainer) { Remove-Item $d -Force -ErrorAction SilentlyContinue }
             }
             New-Item -ItemType Directory -Path $d -Force | Out-Null
           }
           Set-Content -LiteralPath (Join-Path $pbsDir 'ok') -Value 'ok' -Encoding ascii -Force
 
-      # -------------------------
-      # 先建 APP（NSIS + Portable）
-      # -------------------------
-      - name: Build App (nsis + portable)
+      # ---------------- Build App (NSIS + Portable) ----------------
+      - name: Build App (nsis + portable, no publish)
         if: ${{ hashFiles('package.json') != '' }}
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          npx electron-builder --win --x64 --publish never
+          npx electron-builder --win nsis portable --x64 --publish never
 
+      # ---------------- Compute tag ----------------
       - name: Compute tag
         id: tag
         shell: pwsh
         run: |
-          $tag = "v$($Env:GITHUB_RUN_NUMBER)"
-          echo "tag=$tag" >> $env:GITHUB_OUTPUT
+          $inputTag = '${{ inputs.tag }}'
+          if ([string]::IsNullOrWhiteSpace($inputTag)) {
+            $tag = 'v' + $env:GITHUB_RUN_NUMBER
+          } else {
+            $tag = $inputTag
+          }
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Create/Update Release (App assets)
+      # ---------------- Create/Update Release (App assets) ----------------
+      - name: Create/Update Release (App)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
-          draft: false
-          prerelease: false
+          prerelease: ${{ inputs.prerelease }}
+          # 這裡會抓 NSIS 安裝檔 + Portable exe + 其他壓縮檔（視你的 build 設定而定）
           files: |
-            dist/*-x64-portable.exe
             dist/*Setup*.exe
+            dist/*-portable*.exe
+            dist/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # -------------------------
-      # 打包模型與分卷上傳
-      # -------------------------
+      # ---------------- Download model from HuggingFace ----------------
       - name: Install deps for model download
         shell: pwsh
         run: |
@@ -85,7 +102,7 @@ jobs:
       - name: Download SDXL-Turbo model
         shell: pwsh
         env:
-          HF_ENDPOINT: https://huggingface.co
+          HF_HUB_ENABLE_HF_TRANSFER: 1
         run: |
           $target = Join-Path (Get-Location).Path 'python\models\sd-turbo'
           $code = @'
@@ -103,27 +120,42 @@ jobs:
           $env:TARGET_DIR = $target
           python download_model.py
 
-      - name: Pack model into 7z (split 1900MB parts)
+      # ---------------- 7-Zip (900MB volumes) ----------------
+      - name: Ensure 7-Zip
         shell: pwsh
         run: |
-          $out = Join-Path (Get-Location).Path 'dist\model'
-          New-Item -ItemType Directory -Path $out -Force | Out-Null
-          $sevenZip = "C:\Program Files\7-Zip\7z.exe"
-          & $sevenZip a -t7z -mx=3 -v1900m "$out\model-pack.7z" ".\python\models\sd-turbo\*" | Write-Host
+          $seven = "$env:ProgramFiles\7-Zip\7z.exe"
+          if (-not (Test-Path $seven)) {
+            choco install 7zip -y --no-progress
+          }
 
-      - name: Upload model pack parts to the same Release
+      - name: Pack model into 7z (900MB parts)
+        shell: pwsh
+        run: |
+          $seven = "$env:ProgramFiles\7-Zip\7z.exe"
+          if (-not (Test-Path $seven)) { throw "7z.exe not found" }
+          $src = Join-Path (Get-Location).Path 'python\models\sd-turbo\*'
+          $dst = Join-Path (Get-Location).Path 'dist\model-pack.7z'
+          # -mx=1 較快；若要更高壓縮可改 -mx=5~9，時間會變長
+          & $seven a -t7z -m0=lzma2 -mx=1 -ms=off -v900m $dst $src
+          if ($LASTEXITCODE -ne 0) { throw "7z create failed: $LASTEXITCODE" }
+
+      # ---------------- Upload model parts to the same Release ----------------
+      - name: Upload model pack parts to Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
-          files: dist/model/model-pack.7z.*
+          files: |
+            dist/model-pack.7z.*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      #（可選）模型下載 log
+      # ---------------- Optional: upload logs (best-effort) ----------------
       - name: Upload logs (best-effort)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: logs
           path: |
-            C:\npm\_logs\**
-            $HOME\AppData\Local\npm-cache\_logs\**
+            logs/**/*.log
           if-no-files-found: ignore
