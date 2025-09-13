@@ -1,20 +1,11 @@
+// preload.js
 const { contextBridge, ipcRenderer } = require('electron');
 
-function on(channel, cb) {
-  const handler = (_e, data) => cb(data);
-  ipcRenderer.on(channel, handler);
-  return () => ipcRenderer.removeListener(channel, handler);
-}
+contextBridge.exposeInMainWorld('EVI', {
+  check: () => ipcRenderer.invoke('env-check'),
+  downloadModel: (tag) => ipcRenderer.invoke('download-model', { tag: tag || '' }),
 
-contextBridge.exposeInMainWorld('evi', {
-  checkPbs: async () => {
-    try { return await ipcRenderer.invoke('check-pbs'); }
-    catch { return 'missing'; }
-  },
-  startModels: async (cfg) => {
-    try { return await ipcRenderer.invoke('models:start', cfg); }
-    catch (e) { throw new Error(e?.message || String(e)); }
-  },
-  onLog: (cb) => on('dl:log', cb),
-  onProgress: (cb) => on('dl:progress', cb)
+  onLog:       (fn) => ipcRenderer.on('log', (_, m) => fn(m)),
+  onProgress:  (fn) => ipcRenderer.on('dl-progress', (_, p) => fn(p)),
+  onState:     (fn) => ipcRenderer.on('state', (_, s) => fn(s))
 });
