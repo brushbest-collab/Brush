@@ -2,25 +2,54 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const Store = require('electron-store');
 
-const store = new Store({ name: 'evi-brush' });
 const isDev = !app.isPackaged;
-
 let win;
 
-function sendLog(msg) {
-  if (win && !win.isDestroyed()) {
-    win.webContents.send('log', String(msg));
+/* -------------------- 簡易設定儲存器（無外部套件） -------------------- */
+let storePath = null;
+let storeCache = null;
+
+function ensureStoreLoaded() {
+  if (!storePath) {
+    // userData 例如：C:\Users\<你>\AppData\Roaming\evi-brush-desktop
+    storePath = path.join(app.getPath('userData'), 'evi-brush.json');
+  }
+  if (storeCache === null) {
+    try {
+      const txt = fs.readFileSync(storePath, 'utf8');
+      storeCache = JSON.parse(txt);
+    } catch {
+      storeCache = {};
+    }
+  }
+  return storeCache;
+}
+function storeGet(key, defVal) {
+  const s = ensureStoreLoaded();
+  return Object.prototype.hasOwnProperty.call(s, key) ? s[key] : defVal;
+}
+function storeSet(key, val) {
+  const s = ensureStoreLoaded();
+  s[key] = val;
+  try {
+    fs.mkdirSync(path.dirname(storePath), { recursive: true });
+    fs.writeFileSync(storePath, JSON.stringify(s, null, 2), 'utf8');
+  } catch (e) {
+    sendLog(`[store:save:error] ${e?.stack || e}`);
   }
 }
 
+/* -------------------- 共用工具 -------------------- */
+function sendLog(msg) {
+  if (win && !win.isDestroyed()) win.webContents.send('log', String(msg));
+}
 function getResourcesBase() {
-  // 可攜版/開發版/安裝版都能正確取到 base
   return process.env.PORTABLE_EXECUTABLE_DIR || process.resourcesPath || app.getAppPath();
 }
 
-function ensureWindow() {
+/* -------------------- 建立視窗 -------------------- */
+function createWindow() {
   win = new BrowserWindow({
     width: 1200,
     height: 800,
@@ -31,23 +60,20 @@ function ensureWindow() {
       devTools: true,
     },
   });
-
   win.loadFile(path.join(__dirname, 'index.html'));
   if (isDev) win.webContents.openDevTools({ mode: 'detach' });
-
   win.on('closed', () => { win = null; });
 }
 
-app.whenReady().then(ensureWindow);
+app.whenReady().then(createWindow);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) ensureWindow(); });
+app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 
-/* ---------- IPC handlers: 一律 try/catch，永不讓前端卡住 ---------- */
-
+/* -------------------- IPC：一律 try/catch，永不讓前端卡住 -------------------- */
 ipcMain.handle('state:get', async () => {
   try {
     const base = getResourcesBase();
-    const pyDir = path.join(base, 'python');
+    const pyDir  = path.join(base, 'python');
     const pbsDir = path.join(pyDir, 'pbs');
     const okFile = path.join(pbsDir, 'ok');
 
@@ -56,17 +82,15 @@ ipcMain.handle('state:get', async () => {
       fs.existsSync(pbsDir) &&
       fs.existsSync(okFile);
 
-    // 讀上次選過的模型路徑，沒有的話給空字串（讓 UI 提示选择）
-    const modelRoot = store.get('modelRoot', '');
-
+    const modelRoot = storeGet('modelRoot', ''); // 可能是空字串
     sendLog(`[state] bootstrap=${bootstrap} base=${base} modelRoot=${modelRoot || '(none)'}`);
 
     return {
       ok: true,
       bootstrap,
       base,
-      modelRoot,                 // 可能是空字串
-      canSelect: true,           // UI 可用
+      modelRoot,
+      canSelect: true,
     };
   } catch (err) {
     sendLog(`[state:error] ${err?.stack || err}`);
@@ -75,7 +99,7 @@ ipcMain.handle('state:get', async () => {
       bootstrap: false,
       base: '',
       modelRoot: '',
-      canSelect: true,           // 即使錯誤也不鎖 UI
+      canSelect: true,
       message: String(err),
     };
   }
@@ -83,16 +107,15 @@ ipcMain.handle('state:get', async () => {
 
 ipcMain.handle('dialog:pickModelDir', async () => {
   try {
-    const def = store.get('modelRoot', 'D:\\Models');
+    const def = storeGet('modelRoot', 'D:\\Models');
     const res = await dialog.showOpenDialog(win, {
       title: '選擇模型資料夾',
       properties: ['openDirectory', 'createDirectory'],
       defaultPath: def,
     });
     if (res.canceled || !res.filePaths?.length) return { canceled: true };
-
     const picked = res.filePaths[0];
-    store.set('modelRoot', picked);
+    storeSet('modelRoot', picked);
     sendLog(`[pick] modelRoot=${picked}`);
     return { canceled: false, modelRoot: picked };
   } catch (err) {
@@ -101,14 +124,12 @@ ipcMain.handle('dialog:pickModelDir', async () => {
   }
 });
 
-// 這裡預留開始下載/開啟設計頁等 IPC（不會讓 UI 卡住）
 ipcMain.handle('model:download', async (_evt, _opts) => {
-  sendLog('[download] TODO: 實作下載流程或呼叫既有 downloader');
+  sendLog('[download] TODO: 這裡接你的實際下載流程（分卷/續傳/302 轉址處理）');
   return { started: true };
 });
 
 ipcMain.handle('app:openDesign', async () => {
-  // 這裡先跳個提示，之後你可以改成載入真正設計頁
   const { dialog } = require('electron');
   await dialog.showMessageBox(win, {
     type: 'info',
