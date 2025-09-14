@@ -1,85 +1,95 @@
 <!doctype html>
 <html lang="zh-Hant">
 <head>
-  <meta charset="utf-8" />
+  <meta charset="UTF-8" />
   <title>EVI Brush Desktop</title>
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline';"/>
   <style>
-    body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","Helvetica Neue",Arial; margin:24px;}
-    h1{font-size:52px;margin:0 0 8px;}
-    #status{margin:8px 0 16px;color:#333}
-    .row{display:flex;gap:10px;align-items:center;margin:6px 0}
-    button{padding:10px 16px;border:1px solid #ccc;border-radius:8px;background:#fff;cursor:pointer}
-    button.primary{background:#2d6cdf;color:#fff;border-color:#2d6cdf}
-    #modelRoot{font-weight:600;margin-left:8px}
-    progress{width:100%;height:12px;border:1px solid #ddd;border-radius:6px}
-    #log{background:#0e0e0e;color:#8fdf8f;padding:12px;border-radius:8px;white-space:pre-wrap;height:300px;overflow:auto}
-    small.muted{color:#777}
+    body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",Arial,"Microsoft JhengHei",sans-serif;margin:24px}
+    h1{font-size:56px;margin:0 0 8px}
+    .row{display:flex;gap:12px;align-items:center;margin:12px 0}
+    .btn{padding:10px 14px;border:1px solid #c7c7c7;border-radius:8px;background:#f7f7f7;cursor:pointer}
+    .btn.primary{background:#2b6be4;color:#fff;border-color:#2b6be4}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    .pill{padding:6px 10px;border-radius:20px;background:#eef;display:inline-block}
+    #bar{height:10px;border-radius:6px;background:linear-gradient(90deg,#4e79ff,#4ee1ff);opacity:.6;margin:10px 0}
+    #log{background:#0e0e0e;color:#9ae997;font-family:ui-monospace,Menlo,Consolas,monospace;
+         padding:14px;border-radius:10px;height:360px;overflow:auto;white-space:pre-wrap}
   </style>
 </head>
 <body>
   <h1>EVI Brush Desktop</h1>
-  <div id="status">Checking...</div>
+
+  <div class="row"><span id="checkLabel">Checking...</span></div>
 
   <div class="row">
-    <button id="btnPick">選擇模型資料夾</button>
-    <span id="modelRoot">--</span>
+    <button id="btnPick" class="btn">選擇模型資料夾</button>
+    <span id="path" class="pill">--</span>
   </div>
 
-  <progress id="bar" max="1" value="0" style="margin:8px 0 10px;"></progress>
+  <div id="bar"></div>
 
   <div class="row">
-    <button id="btnDownload">下載模型（自動續傳 / 302 兼容）</button>
-    <button id="btnDesign" class="primary">開啟設計 / 生成</button>
+    <button id="btnDownload" class="btn">下載模型（自動續傳 / 302 兼容）</button>
+    <button id="btnDesign" class="btn primary">開啟設計 / 生成</button>
   </div>
 
   <div id="log"></div>
-  <p><small class="muted">判定「已安裝」條件：存在 <code>sdxl-turbo/sd_xl_turbo_1.0(.fp16).safetensors</code>（&gt;100MB）。</small></p>
 
   <script>
-    const $ = sel => document.querySelector(sel);
-    const logEl = $('#log');
-    function log(s){ logEl.textContent += (s + '\n'); logEl.scrollTop = logEl.scrollHeight; }
+    const $ = (sel) => document.querySelector(sel);
+    const log = (m) => { const el = $('#log'); el.textContent += `[ui] ${m}\n`; el.scrollTop = el.scrollHeight; };
+    window.evi?.onLog((m)=>log(m));
 
-    async function refresh(){
-      const st = await window.api.getState();
-      $('#modelRoot').textContent = st.modelRoot;
-      $('#bar').value = 0;
-      if (st.bootstrap) {
-        $('#status').textContent = st.installed
-          ? 'Python bootstrap found. 模型已安裝。'
-          : 'Python bootstrap found. 模型未安裝。';
-      } else {
-        $('#status').textContent = 'Bootstrap 未就緒。';
+    async function getStateSafe(timeoutMs = 5000) {
+      try {
+        const p = window.evi.getState();
+        const t = new Promise(resolve => setTimeout(() => resolve({ timeout: true }), timeoutMs));
+        return await Promise.race([p, t]);
+      } catch (e) {
+        return { ok:false, message:String(e) };
       }
     }
 
-    window.api.onLog(s => log('[ui] ' + s));
-    window.api.onProgress(v => { $('#bar').value = v; });
+    async function init() {
+      $('#btnPick').disabled = false;     // 先放開，避免卡住時不能選
+      $('#btnDownload').disabled = false;
+      $('#btnDesign').disabled = false;
 
-    $('#btnPick').onclick = async () => {
-      const r = await window.api.pickModelDir();
-      if (r) { $('#modelRoot').textContent = r.modelRoot; await refresh(); }
-    };
-
-    $('#btnDownload').onclick = async () => {
-      log('開始下載模型...');
-      try {
-        await window.api.downloadModel();
-        await refresh();
-      } catch (e) {
-        alert('下載失敗：' + e.message);
+      const st = await getStateSafe();
+      if (st?.timeout) {
+        log('狀態查詢逾時（已啟用手動操作）。');
+        $('#checkLabel').textContent = '狀態查詢逾時（可手動指定模型資料夾）';
+      } else if (st?.ok) {
+        $('#checkLabel').textContent = st.bootstrap ? 'Python bootstrap found.' : 'Python bootstrap not found.';
+        $('#path').textContent = st.modelRoot || '--';
+        log(`state received: bootstrap=${st.bootstrap}, modelRoot=${st.modelRoot || '(none)'}`);
+      } else {
+        $('#checkLabel').textContent = '狀態讀取失敗（可手動操作）。';
+        log(`state error: ${st?.message || 'unknown'}`);
       }
-    };
+    }
 
-    $('#btnDesign').onclick = async () => {
-      // 先確認已安裝
-      const st = await window.api.getState();
-      if (!st.installed) { alert('尚未安裝模型，請先下載或指定模型資料夾。'); return; }
-      await window.api.openDesign();
-    };
+    $('#btnPick').addEventListener('click', async () => {
+      const r = await window.evi.pickModelDir();
+      if (!r?.canceled && r?.modelRoot) {
+        $('#path').textContent = r.modelRoot;
+        log(`選擇模型資料夾：${r.modelRoot}`);
+      } else {
+        if (r?.error) log(`選擇模型資料夾失敗：${r.error}`);
+      }
+    });
 
-    refresh();
+    $('#btnDownload').addEventListener('click', async () => {
+      log('開始下載模型（示範）...');
+      await window.evi.startDownload({});
+    });
+
+    $('#btnDesign').addEventListener('click', async () => {
+      await window.evi.openDesign();
+    });
+
+    init();
   </script>
 </body>
 </html>
