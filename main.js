@@ -1,129 +1,125 @@
+// main.js
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 const isDev = !app.isPackaged;
-const log = (...a) => console.log('[main]', ...a);
 
-// 解析應用根目錄（封包後是 resourcesPath，開發時是專案根）
-function getAppRoot() {
-  return app.isPackaged ? process.resourcesPath : __dirname;
+// ──────────────────────────────────────────────────────────
+// 小型持久化（簡單版；若你已有 electron-store 可替換成它）
+// ──────────────────────────────────────────────────────────
+const STORE_FILE = path.join(app.getPath('userData'), 'evi-store.json');
+function loadStore() {
+  try { return JSON.parse(fs.readFileSync(STORE_FILE, 'utf8')); }
+  catch { return {}; }
 }
+function saveStore(obj) {
+  try { fs.writeFileSync(STORE_FILE, JSON.stringify(obj, null, 2), 'utf8'); } catch {}
+}
+const store = loadStore();
 
-// 檢查 python/pbs/ok 是否存在（輕量）
-function checkBootstrap() {
-  try {
-    const okFile = path.join(getAppRoot(), 'python', 'pbs', 'ok');
-    const exists = fs.existsSync(okFile);
-    log('bootstrap ok ?', exists, '->', okFile);
-    return { ok: exists, path: okFile };
-  } catch (e) {
-    log('checkBootstrap error', e);
-    return { ok: false, path: null, error: String(e) };
-  }
-}
-
-// 讀取 / 儲存偏好（存 userData）
-function prefFile() {
-  return path.join(app.getPath('userData'), 'pref.json');
-}
-function loadPref() {
-  try {
-    const p = prefFile();
-    if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
-  } catch {}
-  return {};
-}
-function savePref(obj) {
-  try {
-    fs.mkdirSync(app.getPath('userData'), { recursive: true });
-    fs.writeFileSync(prefFile(), JSON.stringify(obj, null, 2));
-  } catch (e) {
-    log('savePref error', e);
-  }
-}
-
-// 解析模型根目錄（預設 D:\EVI\Models，如果沒有 D 碟則放 userData\models）
-function resolveModelRoot() {
-  const pref = loadPref();
-  if (pref.modelRoot && typeof pref.modelRoot === 'string') {
-    return pref.modelRoot;
-  }
-  const dDrive = process.platform === 'win32' && fs.existsSync('D:\\');
-  const def = dDrive ? 'D:\\EVI\\Models' : path.join(app.getPath('userData'), 'models');
-  return def;
-}
-
-// 建立視窗
+// ──────────────────────────────────────────────────────────
+// Window
+// ──────────────────────────────────────────────────────────
 let win;
-function createWindow() {
+function create() {
   win = new BrowserWindow({
-    width: 1220,
+    width: 1160,
     height: 820,
-    show: true,
     webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js')
+      nodeIntegration: false,
+      sandbox: true
     }
   });
 
   win.loadFile(path.join(__dirname, 'index.html'));
   if (isDev) win.webContents.openDevTools({ mode: 'detach' });
-
-  win.webContents.on('did-finish-load', () => {
-    log('did-finish-load -> send app-state');
-    // 立即送一次狀態，避免前端永遠停在 checking
-    sendState();
-  });
 }
+app.whenReady().then(create);
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 
-function currentState() {
-  const bs = checkBootstrap();
-  const modelRoot = resolveModelRoot();
-  const state = {
-    ok: true,
-    bootstrap: bs,
-    modelRoot,
-    userData: app.getPath('userData'),
-    appRoot: getAppRoot(),
-    isDev
-  };
-  return state;
-}
-
-function sendState() {
-  try {
-    const state = currentState();
-    win.webContents.send('app-state', state);
-  } catch (e) {
-    log('sendState error', e);
+// ──────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────
+function sendLog(msg) {
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('log', `[ui] ${msg}`);
   }
 }
+function getModelRoot() {
+  return store.modelRoot || '';
+}
+function setModelRoot(p) {
+  store.modelRoot = p;
+  saveStore(store);
+}
 
-// IPCs
-ipcMain.handle('get-state', () => {
-  log('ipc get-state');
-  return currentState();
+// 有沒有把模型解壓好？（簡單判斷：資料夾存在而且裡面有檔案）
+function isModelInstalled() {
+  const root = getModelRoot();
+  if (!root) return false;
+  try {
+    const stat = fs.statSync(root);
+    if (!stat.isDirectory()) return false;
+    const files = fs.readdirSync(root);
+    return files && files.length > 0;
+  } catch { return false; }
+}
+
+// ──────────────────────────────────────────────────────────
+// IPC
+// ──────────────────────────────────────────────────────────
+ipcMain.handle('get-state', async () => {
+  return {
+    bootstrap: true,
+    modelRoot: getModelRoot(),
+    modelInstalled: isModelInstalled()
+  };
 });
 
-ipcMain.handle('choose-model-dir', async () => {
-  const def = resolveModelRoot();
-  const res = await dialog.showOpenDialog(win, {
-    title: '選擇模型根目錄',
-    defaultPath: def,
-    properties: ['openDirectory', 'createDirectory']
-  });
-  if (res.canceled || !res.filePaths?.length) return { canceled: true };
-  const modelRoot = res.filePaths[0];
-  const pref = loadPref();
-  pref.modelRoot = modelRoot;
-  savePref(pref);
-  log('set modelRoot ->', modelRoot);
-  return { canceled: false, modelRoot };
+ipcMain.handle('select-model-dir', async () => {
+  const r = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
+  if (r.canceled || !r.filePaths?.[0]) return { ok: false };
+  const p = r.filePaths[0];
+  setModelRoot(p);
+  sendLog(`選擇模型資料夾：${p}`);
+  return { ok: true, path: p, modelInstalled: isModelInstalled() };
 });
 
-ipcMain.on('renderer-log', (_e, ...args) => log('[renderer]', ...args));
+// 下載模型（仍示範；真正下載你已用 workflow 發佈，這裡保留按鈕）
+ipcMain.handle('download-model', async () => {
+  sendLog('開始下載模型（示範 / 不實作下載）');
+  await new Promise(r => setTimeout(r, 800));
+  sendLog('示範下載完成。');
+  return { ok: true };
+});
 
-app.whenReady().then(createWindow);
-app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+// 進入生成頁
+ipcMain.handle('open-generator', async () => {
+  if (!isModelInstalled()) {
+    return { ok: false, message: '尚未安裝模型，請先下載 / 指定模型資料夾。' };
+  }
+  return { ok: true };
+});
+
+// 生成（示範版；之後把這裡改成打你的 Python 服務） 
+ipcMain.handle('generate', async (_e, payload) => {
+  const { style, prompt, negative, width, height, steps, cfg, seed } = payload;
+
+  sendLog(`開始生成（示範）：style=${style}, size=${width}x${height}, steps=${steps}, cfg=${cfg}, seed=${seed}`);
+  await new Promise(r => setTimeout(r, 1200));
+  sendLog('生成完成（示範）。');
+
+  // 回傳一張 base64 假圖（灰底+文字），僅供 UI 顯示
+  const svg = `
+<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+  <rect width="100%" height="100%" fill="#f2f3f5"/>
+  <text x="50%" y="50%" text-anchor="middle" fill="#333" font-size="20" font-family="Segoe UI, Arial" dy="5">
+    Demo: ${style}
+  </text>
+</svg>`;
+  const img = 'data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64');
+  return { ok: true, imageDataUrl: img };
+});
