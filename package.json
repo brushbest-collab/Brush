@@ -1,21 +1,19 @@
 {
   "name": "evi-brush-desktop",
-  "version": "0.1.0",
-  "description": "EVI Brush Desktop",
+  "version": "0.2.0",
+  "description": "EVI Brush Desktop (non-demo downloader)",
   "main": "main.js",
   "author": "brushbest-collab",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder --win --x64 --publish never",
-    "dist:portable": "electron-builder --win portable --x64 --publish never",
-    "release": "electron-builder --win --x64 --publish always",
-    "postinstall": "electron-builder install-app-deps"
+    "dist": "electron-builder --win --x64 --publish never"
   },
   "dependencies": {
+    "7zip-bin": "^5.2.0",
     "electron-updater": "^6.1.7",
-    "7zip-bin": "^5.2.0"
+    "follow-redirects": "^1.15.6"
   },
   "devDependencies": {
     "electron": "^30.0.0",
@@ -24,40 +22,27 @@
   "build": {
     "appId": "com.evi.brush.desktop",
     "productName": "EVI Brush Desktop",
-    "artifactName": "EVI-Brush-Desktop-${version}-${arch}.${ext}",
-
     "directories": {
       "output": "dist"
     },
-
     "files": [
       "main.js",
       "preload.js",
       "index.html",
       "build/**",
       "!python/venv/**",
-      "!python/models/**",
       "!**/*.log",
       "!**/*.md",
       "!.git/**",
       "!.github/**"
     ],
-
-    "extraResources": [
-      { "from": "python/pbs", "to": "python/pbs" }
-    ],
-
+    "extraResources": [],
     "asar": true,
-    "asarUnpack": ["python/**"],
-
+    "asarUnpack": [],
     "win": {
       "icon": "build/icon.ico",
-      "target": [
-        "nsis",
-        "portable"
-      ]
+      "target": ["nsis"]
     },
-
     "nsis": {
       "oneClick": true,
       "perMachine": false,
@@ -66,16 +51,6 @@
       "shortcutName": "EVI Brush Desktop",
       "runAfterFinish": true,
       "uninstallDisplayName": "EVI Brush Desktop"
-    },
-
-    "portable": {
-      "artifactName": "EVI-Brush-Desktop-Portable-${version}-${arch}.exe"
-    },
-
-    "publish": [
-      {
-        "provider": "github"
-      }
-    ]
+    }
   }
 }
