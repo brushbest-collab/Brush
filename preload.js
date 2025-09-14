@@ -1,14 +1,13 @@
 // preload.js
 const { contextBridge, ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld('evi', {
-  getState: () => ipcRenderer.invoke('get-state'),
-  selectModelDir: () => ipcRenderer.invoke('select-model-dir'),
-  downloadModel: () => ipcRenderer.invoke('download-model'),
-  openGenerator: () => ipcRenderer.invoke('open-generator'),
-  generate: (cfg) => ipcRenderer.invoke('generate', cfg),
-  onLog: (cb) => {
-    ipcRenderer.removeAllListeners('log');
-    ipcRenderer.on('log', (_e, msg) => cb?.(msg));
-  }
+contextBridge.exposeInMainWorld('api', {
+  getState:        () => ipcRenderer.invoke('get-state'),
+  pickModelDir:    () => ipcRenderer.invoke('pick-model-dir'),
+  setModelRoot:    (dir) => ipcRenderer.invoke('set-model-root', dir),
+  downloadModel:   () => ipcRenderer.invoke('download-model'),
+  openDesign:      () => ipcRenderer.invoke('open-design'),
+
+  onLog:      (cb) => ipcRenderer.on('ui-log', (_e, s) => cb(s)),
+  onProgress: (cb) => ipcRenderer.on('ui-progress', (_e, v) => cb(v)),
 });
