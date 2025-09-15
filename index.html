@@ -1,95 +1,62 @@
 <!doctype html>
 <html lang="zh-Hant">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- 嚴格但實用的 CSP：不允許 inline script；允許到 GitHub 下載模型 -->
+  <meta http-equiv="Content-Security-Policy"
+        content="
+          default-src 'self';
+          script-src 'self';
+          style-src 'self' 'unsafe-inline';
+          img-src 'self' data: blob:;
+          connect-src 'self'
+            https://api.github.com
+            https://github.com
+            https://objects.githubusercontent.com
+            https://*.githubusercontent.com
+            https://release-assets.githubusercontent.com;
+          frame-ancestors 'none';
+          base-uri 'self';
+          form-action 'none';
+        ">
+
   <title>EVI Brush Desktop</title>
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline';"/>
   <style>
-    body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",Arial,"Microsoft JhengHei",sans-serif;margin:24px}
-    h1{font-size:56px;margin:0 0 8px}
-    .row{display:flex;gap:12px;align-items:center;margin:12px 0}
-    .btn{padding:10px 14px;border:1px solid #c7c7c7;border-radius:8px;background:#f7f7f7;cursor:pointer}
-    .btn.primary{background:#2b6be4;color:#fff;border-color:#2b6be4}
-    .btn:disabled{opacity:.5;cursor:not-allowed}
-    .pill{padding:6px 10px;border-radius:20px;background:#eef;display:inline-block}
-    #bar{height:10px;border-radius:6px;background:linear-gradient(90deg,#4e79ff,#4ee1ff);opacity:.6;margin:10px 0}
-    #log{background:#0e0e0e;color:#9ae997;font-family:ui-monospace,Menlo,Consolas,monospace;
-         padding:14px;border-radius:10px;height:360px;overflow:auto;white-space:pre-wrap}
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Noto Sans, "Helvetica Neue", Arial;
+           margin: 24px; }
+    h1 { font-size: 48px; margin: 0 0 16px; }
+    .row { display: flex; gap: 12px; align-items: center; margin: 12px 0; }
+    button { padding: 10px 16px; border-radius: 8px; border: 1px solid #d0d7de; background: #1f6feb; color: #fff; }
+    button[disabled] { opacity: .5; cursor: not-allowed; }
+    #status { margin: 6px 0 18px; font-size: 18px; }
+    #bar { height: 8px; background: #e5e9f2; border-radius: 6px; overflow: hidden; }
+    #bar > div { height: 100%; width: 0%; background: linear-gradient(90deg,#60a5fa,#22c55e); transition: width .2s; }
+    #log { background: #0d1117; color: #e6edf3; padding: 12px; border-radius: 8px; height: 320px; overflow: auto; }
+    #modelRoot { font-weight: 600; }
   </style>
 </head>
 <body>
   <h1>EVI Brush Desktop</h1>
 
-  <div class="row"><span id="checkLabel">Checking...</span></div>
+  <div id="status">Checking...</div>
 
   <div class="row">
-    <button id="btnPick" class="btn">選擇模型資料夾</button>
-    <span id="path" class="pill">--</span>
+    <button id="btnPickModelRoot" disabled>選擇模型資料夾</button>
+    <span id="modelRoot">--</span>
   </div>
 
-  <div id="bar"></div>
+  <div id="bar"><div id="barFill"></div></div>
 
   <div class="row">
-    <button id="btnDownload" class="btn">下載模型（自動續傳 / 302 兼容）</button>
-    <button id="btnDesign" class="btn primary">開啟設計 / 生成</button>
+    <button id="btnDownload" disabled>下載模型（自動續傳 / 302 兼容）</button>
+    <button id="btnStart" disabled>開啟設計 / 生成</button>
   </div>
 
-  <div id="log"></div>
+  <pre id="log"></pre>
 
-  <script>
-    const $ = (sel) => document.querySelector(sel);
-    const log = (m) => { const el = $('#log'); el.textContent += `[ui] ${m}\n`; el.scrollTop = el.scrollHeight; };
-    window.evi?.onLog((m)=>log(m));
-
-    async function getStateSafe(timeoutMs = 5000) {
-      try {
-        const p = window.evi.getState();
-        const t = new Promise(resolve => setTimeout(() => resolve({ timeout: true }), timeoutMs));
-        return await Promise.race([p, t]);
-      } catch (e) {
-        return { ok:false, message:String(e) };
-      }
-    }
-
-    async function init() {
-      $('#btnPick').disabled = false;     // 先放開，避免卡住時不能選
-      $('#btnDownload').disabled = false;
-      $('#btnDesign').disabled = false;
-
-      const st = await getStateSafe();
-      if (st?.timeout) {
-        log('狀態查詢逾時（已啟用手動操作）。');
-        $('#checkLabel').textContent = '狀態查詢逾時（可手動指定模型資料夾）';
-      } else if (st?.ok) {
-        $('#checkLabel').textContent = st.bootstrap ? 'Python bootstrap found.' : 'Python bootstrap not found.';
-        $('#path').textContent = st.modelRoot || '--';
-        log(`state received: bootstrap=${st.bootstrap}, modelRoot=${st.modelRoot || '(none)'}`);
-      } else {
-        $('#checkLabel').textContent = '狀態讀取失敗（可手動操作）。';
-        log(`state error: ${st?.message || 'unknown'}`);
-      }
-    }
-
-    $('#btnPick').addEventListener('click', async () => {
-      const r = await window.evi.pickModelDir();
-      if (!r?.canceled && r?.modelRoot) {
-        $('#path').textContent = r.modelRoot;
-        log(`選擇模型資料夾：${r.modelRoot}`);
-      } else {
-        if (r?.error) log(`選擇模型資料夾失敗：${r.error}`);
-      }
-    });
-
-    $('#btnDownload').addEventListener('click', async () => {
-      log('開始下載模型（示範）...');
-      await window.evi.startDownload({});
-    });
-
-    $('#btnDesign').addEventListener('click', async () => {
-      await window.evi.openDesign();
-    });
-
-    init();
-  </script>
+  <!-- 所有前端邏輯改到獨立檔案，避免 inline script 被 CSP 擋掉 -->
+  <script src="./renderer.js"></script>
 </body>
 </html>
