@@ -1,30 +1,53 @@
 {
   "name": "evi-brush-desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "description": "EVI Brush Desktop (minimal bootstrap check)",
   "main": "main.js",
+  "author": "brushbest-collab",
+  "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win --x64 --publish never"
-  },
-  "dependencies": {
-    "electron-store": "^8.1.0"
+    "dist": "electron-builder --win --x64"
   },
   "devDependencies": {
     "electron": "^30.0.0",
     "electron-builder": "^24.13.3"
   },
+  "dependencies": {},
   "build": {
     "appId": "com.evi.brush.desktop",
+    "productName": "EVI Brush Desktop",
     "files": [
       "main.js",
       "preload.js",
       "renderer.js",
       "index.html",
       "build/**",
-      "!**/*.md",
+      "python/**",
       "!**/*.log",
+      "!**/*.md",
       "!.git/**",
       "!.github/**"
-    ]
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "python/**"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": ["nsis"]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "EVI Brush Desktop",
+      "runAfterFinish": true,
+      "uninstallDisplayName": "EVI Brush Desktop"
+    }
   }
 }
