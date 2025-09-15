@@ -1,21 +1,13 @@
 {
   "name": "evi-brush-desktop",
   "version": "0.1.0",
-  "description": "EVI Brush Desktop",
-  "private": true,
   "main": "main.js",
-  "author": "brushbest-collab",
-  "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "dev": "electron .",
-    "pack": "electron-builder --dir",
-    "dist": "electron-builder --win --x64 --publish never",
-    "dist:portable": "electron-builder --win portable --x64 --publish never"
+    "dist": "electron-builder --win --x64 --publish never"
   },
   "dependencies": {
-    "electron-store": "^8.2.0",
-    "electron-updater": "^6.1.7"
+    "electron-store": "^8.1.0"
   },
   "devDependencies": {
     "electron": "^30.0.0",
@@ -23,50 +15,16 @@
   },
   "build": {
     "appId": "com.evi.brush.desktop",
-    "productName": "EVI Brush Desktop",
-    "directories": {
-      "output": "dist"
-    },
-    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "files": [
       "main.js",
       "preload.js",
+      "renderer.js",
       "index.html",
-      "renderer/**",
-      "assets/**",
       "build/**",
-      "!python/venv/**",
-      "!**/*.log",
       "!**/*.md",
+      "!**/*.log",
       "!.git/**",
       "!.github/**"
-    ],
-    "extraResources": [
-      { "from": "python/pbs", "to": "python/pbs" },
-      { "from": "python/models", "to": "python/models", "filter": ["**/*"] }
-    ],
-    "asar": true,
-    "asarUnpack": [
-      "python/**"
-    ],
-    "win": {
-      "icon": "build/icon.ico",
-      "target": [
-        "nsis",
-        "portable"
-      ]
-    },
-    "portable": {
-      "artifactName": "${productName}-${version}-${os}-${arch}-portable.exe"
-    },
-    "nsis": {
-      "oneClick": true,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": false,
-      "createDesktopShortcut": true,
-      "shortcutName": "EVI Brush Desktop",
-      "runAfterFinish": true,
-      "uninstallDisplayName": "EVI Brush Desktop"
-    }
+    ]
   }
 }
