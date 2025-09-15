@@ -6,6 +6,7 @@ const $designBtn = document.querySelector('#designBtn');
 const $log = document.querySelector('#log');
 
 let appState = { bootstrap: false, modelRoot: '' };
+let busy = false;
 
 function log(msg) {
   const at = new Date().toLocaleTimeString();
@@ -22,9 +23,9 @@ function render() {
     $status.className = 'warn';
   }
   $rootLabel.textContent = appState.modelRoot || '--';
-  // 按鈕狀態
-  $downloadBtn.disabled = false; // 下載模型（示範用，這裡不實作）
-  $designBtn.disabled = !(appState.bootstrap && appState.modelRoot);
+
+  $downloadBtn.disabled = busy;
+  $designBtn.disabled = busy || !(appState.bootstrap && appState.modelRoot);
 }
 
 async function refresh() {
@@ -45,9 +46,17 @@ $pickBtn.addEventListener('click', async () => {
 });
 
 $downloadBtn.addEventListener('click', async () => {
-  // 這裡保留你的下載流程（目前示範不實作）
-  log('開始下載模型（示範 / 不實作）');
-  log('示範下載完成。');
+  if (busy) return;
+  busy = true; render();
+  try {
+    log('開始下載模型（正式）…');
+    await window.api.downloadModel(appState.modelRoot);
+    log('下載流程完成。');
+  } catch (e) {
+    log('下載失敗：' + (e?.message || e));
+  } finally {
+    busy = false; render();
+  }
 });
 
 $designBtn.addEventListener('click', async () => {
@@ -55,4 +64,5 @@ $designBtn.addEventListener('click', async () => {
   await window.api.startDesign(appState);
 });
 
+window.api.onLog((m) => log(m));
 document.addEventListener('DOMContentLoaded', refresh);
