@@ -1,24 +1,24 @@
+// preload.js
 const { contextBridge, ipcRenderer } = require("electron");
 
-// 小工具：把主行程傳回來的事件回呼給前端
-function subscribe(channel, handler) {
-  const listener = (_, payload) => handler(payload);
-  ipcRenderer.on(channel, listener);
-  return () => ipcRenderer.removeListener(channel, listener);
-}
+contextBridge.exposeInMainWorld("evi", {
+  // 狀態
+  getState: () => ipcRenderer.invoke("state:get"),
 
-contextBridge.exposeInMainWorld("api", {
-  getState: () => ipcRenderer.invoke("state"), // { bootstrap, installed, modelRoot }
-  pickModelRoot: () => ipcRenderer.invoke("pick-model-root"),
+  // 選資料夾
+  pickModelRoot: () => ipcRenderer.invoke("model:pick-root"),
 
-  // 下載模型：opts = { partSizeMB, tag }, onEvent(event)
-  downloadModel: (opts, onEvent) => {
-    const channel = `dl:${Date.now()}:${Math.random().toString(36).slice(2)}`;
-    const unsubscribe = subscribe(channel, (payload) => onEvent?.(payload));
-    return ipcRenderer
-      .invoke("download-model", { ...opts, channel })
-      .finally(unsubscribe);
-  },
+  // 下載（含續傳 / 302 兼容在主程序處理）
+  downloadAll: () => ipcRenderer.invoke("model:download-all"),
 
-  startDesigner: () => ipcRenderer.invoke("start-ui"),
+  // 開啟設計/生成
+  goDesign: () => ipcRenderer.invoke("ui:go"),
+
+  // UI 輔助
+  alert: (msg) => ipcRenderer.invoke("ui:alert", String(msg)),
+
+  // 訂閱事件
+  onLog: (cb) => ipcRenderer.on("evt:log", cb),
+  onProgress: (cb) => ipcRenderer.on("evt:progress", cb),
+  onState: (cb) => ipcRenderer.on("evt:state", cb)
 });
