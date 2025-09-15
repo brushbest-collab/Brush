@@ -1,9 +1,11 @@
+// preload.js
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
-  getState: () => ipcRenderer.invoke('state:get'),
+  init: () => ipcRenderer.invoke('state:init'),
   pickRoot: () => ipcRenderer.invoke('model:pick-root'),
-  startDesign: (state) => ipcRenderer.invoke('design:start', state),
-  downloadModel: (modelRoot) => ipcRenderer.invoke('model:download', modelRoot),
-  onLog: (fn) => ipcRenderer.on('log:append', (_e, m) => fn(m))
+  downloadModel: (root) => ipcRenderer.invoke('model:download', { root }),
+  openGenerator: () => ipcRenderer.invoke('app:open-generator'),
+  onLog: (cb) => ipcRenderer.on('ui:log', (_, msg) => cb?.(msg)),
+  onProgress: (cb) => ipcRenderer.on('ui:progress', (_, p) => cb?.(p))
 });
