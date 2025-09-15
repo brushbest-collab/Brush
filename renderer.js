@@ -1,68 +1,60 @@
-const $status = document.querySelector('#status');
-const $pickBtn = document.querySelector('#pickRootBtn');
-const $rootLabel = document.querySelector('#rootLabel');
-const $downloadBtn = document.querySelector('#downloadBtn');
-const $designBtn = document.querySelector('#designBtn');
-const $log = document.querySelector('#log');
+// renderer.js
+const $ = (q) => document.querySelector(q);
+const logEl = $('#log');
+const bar = $('#bar');
+const rootText = $('#root-path');
+const pickBtn = $('#btn-pick');
+const dlBtn = $('#btn-dl');
+const goBtn = $('#btn-go');
+const bootstrapEl = $('#bootstrap');
 
-let appState = { bootstrap: false, modelRoot: '' };
-let busy = false;
-
-function log(msg) {
-  const at = new Date().toLocaleTimeString();
-  $log.value += `[ui ${at}] ${msg}\n`;
-  $log.scrollTop = $log.scrollHeight;
+function appendLog(t) {
+  const line = document.createElement('div');
+  line.textContent = t;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
 }
 
-function render() {
-  if (appState.bootstrap) {
-    $status.textContent = 'Python bootstrap found.';
-    $status.className = 'ok';
-  } else {
-    $status.textContent = 'Python bootstrap not found（請確認安裝包是否完整）';
-    $status.className = 'warn';
-  }
-  $rootLabel.textContent = appState.modelRoot || '--';
-
-  $downloadBtn.disabled = busy;
-  $designBtn.disabled = busy || !(appState.bootstrap && appState.modelRoot);
+function setProgress(frac) {
+  const v = Math.max(0, Math.min(1, frac || 0));
+  bar.style.width = `${v * 100}%`;
 }
 
-async function refresh() {
-  $status.textContent = 'Checking...';
-  appState = await window.api.getState();
-  render();
+async function init() {
+  const s = await window.api.init();
+  bootstrapEl.textContent = s.bootstrap ? 'Python bootstrap found.' : 'Python bootstrap not found（請確認安裝包是否完整）';
+  rootText.textContent = s.modelRoot || '--';
 }
 
-$pickBtn.addEventListener('click', async () => {
+pickBtn.addEventListener('click', async () => {
   const p = await window.api.pickRoot();
-  if (p) {
-    appState.modelRoot = p;
-    log(`選擇模型資料夾：${p}`);
-    render();
-  } else {
-    log('選擇模型資料夾：已取消');
-  }
+  if (p) rootText.textContent = p;
 });
 
-$downloadBtn.addEventListener('click', async () => {
-  if (busy) return;
-  busy = true; render();
+dlBtn.addEventListener('click', async () => {
+  const root = rootText.textContent.trim();
+  if (!root || root === '--') {
+    appendLog('[ui] 尚未選擇模型資料夾。');
+    return;
+  }
   try {
-    log('開始下載模型（正式）…');
-    await window.api.downloadModel(appState.modelRoot);
-    log('下載流程完成。');
+    appendLog('[ui] 準備下載…');
+    setProgress(0);
+    await window.api.downloadModel(root);
+    setProgress(1);
   } catch (e) {
-    log('下載失敗：' + (e?.message || e));
-  } finally {
-    busy = false; render();
+    appendLog(`[ui] 下載/解壓錯誤：${e.message || e}`);
   }
 });
 
-$designBtn.addEventListener('click', async () => {
-  if ($designBtn.disabled) return;
-  await window.api.startDesign(appState);
+goBtn.addEventListener('click', () => {
+  window.api.openGenerator();
 });
 
-window.api.onLog((m) => log(m));
-document.addEventListener('DOMContentLoaded', refresh);
+window.api.onLog((m) => appendLog(m));
+window.api.onProgress(({ current, total }) => {
+  const frac = total ? current / total : 0;
+  setProgress(frac);
+});
+
+init();
