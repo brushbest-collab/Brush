@@ -1,239 +1,217 @@
+// main.js
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
-const { URL } = require('url');
 const { spawn } = require('child_process');
 
-let mainWindow = null;
+// ------------------------ 下載來源區（請改成你的實際資訊） ------------------------
+const BASE_URL = 'https://github.com/brushbest-collab/Brush/releases/download/v73/'; // ← 你的 Release base URL（最後必須保留 /）
+const PREFIX   = 'model-pack.7z.';   // ← 分卷檔案前綴，ex: model-pack.7z.
+const PARTS    = 19;                 // ← 分卷份數（例：19 或 302）
+// ---------------------------------------------------------------------------
 
-// -------------------- Settings (只存模型路徑) --------------------
-const settingsFile = path.join(app.getPath('userData'), 'settings.json');
-function loadSettings() {
-  try { return JSON.parse(fs.readFileSync(settingsFile, 'utf8')); } catch { return { modelRoot: '' }; }
+// 可放 GH_TOKEN 支援私有 release
+const COMMON_HEADERS = {};
+if (process.env.GH_TOKEN) {
+  COMMON_HEADERS['Authorization'] = `token ${process.env.GH_TOKEN}`;
 }
-function saveSettings(st) {
-  try { fs.writeFileSync(settingsFile, JSON.stringify(st, null, 2)); } catch {}
-}
-let settings = loadSettings();
 
-// -------------------- Python bootstrap 檢查 --------------------
-function resolvePythonBase() {
-  const cands = [
-    path.join(process.resourcesPath, 'python'), // packaged
-    path.join(__dirname, 'python'),             // dev
-    path.join(process.cwd(), 'python')
-  ];
-  for (const p of cands) if (fs.existsSync(p)) return p;
-  return null;
+// 簡單設定檔（存使用者選的 modelRoot）
+const userConfPath = path.join(app.getPath('userData'), 'evi-brush.json');
+function readConf() {
+  try { return JSON.parse(fs.readFileSync(userConfPath, 'utf8')); }
+  catch { return {}; }
 }
+function writeConf(obj) {
+  fs.mkdirSync(path.dirname(userConfPath), { recursive: true });
+  fs.writeFileSync(userConfPath, JSON.stringify(obj, null, 2), 'utf8');
+}
+
+function exists(p) { try { fs.accessSync(p); return true; } catch { return false; } }
+
+function get7zExe() {
+  // 先找 app 內建的 7za，否則用系統的 7z/7za
+  const embed = path.join(process.resourcesPath, 'resources', '7za.exe');
+  if (process.platform === 'win32' && exists(embed)) return embed;
+  // mac / linux 可改放 resources/7za (自行提供)；退而求其次找系統 PATH
+  return process.platform === 'win32' ? '7z' : '7za';
+}
+
 function checkBootstrap() {
-  const base = resolvePythonBase();
-  return !!(base && fs.existsSync(path.join(base, 'pbs', 'ok')));
+  // 判斷安裝包內沒被刪的 bootstrap 檔（有就顯示「Python bootstrap found」）
+  const p = path.join(process.resourcesPath, 'python', 'pbs', 'ok');
+  return exists(p);
 }
 
-// -------------------- Log helper --------------------
-function sendLog(m) {
-  if (mainWindow) mainWindow.webContents.send('log:append', m);
-}
-
-// -------------------- HTTP + 302 follow + Range 續傳 --------------------
-function httpsGetFollow(url, options = {}, maxRedirects = 5) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    const req = https.request(
-      {
-        protocol: u.protocol,
-        hostname: u.hostname,
-        port: u.port || (u.protocol === 'https:' ? 443 : 80),
-        path: u.pathname + u.search,
-        method: options.method || 'GET',
-        headers: options.headers || {}
-      },
-      res => {
-        // Redirect
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && maxRedirects > 0) {
-          const next = new URL(res.headers.location, url).toString();
-          res.resume();
-          resolve(httpsGetFollow(next, options, maxRedirects - 1));
-          return;
-        }
-        resolve(res);
-      }
-    );
-    req.on('error', reject);
-    req.end();
-  });
-}
-
-async function downloadWithResume(url, dest, retries = 5) {
-  await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-
-  let start = 0;
-  if (fs.existsSync(dest)) start = fs.statSync(dest).size;
-
-  let res;
-  try {
-    res = await httpsGetFollow(url, {
-      headers: start ? { Range: `bytes=${start}-` } : {}
-    });
-  } catch (e) {
-    if (retries > 0) return downloadWithResume(url, dest, retries - 1);
-    throw e;
-  }
-
-  if (res.statusCode === 416) {
-    // 已完整
-    return;
-  }
-  if (res.statusCode && res.statusCode >= 400) {
-    throw new Error(`HTTP ${res.statusCode} for ${url}`);
-  }
-
-  const total =
-    (parseInt(res.headers['content-length'] || '0', 10) || 0) + start;
-  const writeStream = fs.createWriteStream(dest, { flags: start ? 'a' : 'w' });
-
-  let received = start;
-  let lastTick = Date.now();
-
-  await new Promise((resolve, reject) => {
-    res.on('data', chunk => {
-      received += chunk.length;
-      const now = Date.now();
-      if (now - lastTick > 700) {
-        const pct = total ? ((received / total) * 100).toFixed(1) : '?';
-        sendLog(`下載中：${path.basename(dest)}  ${Math.round(received / 1e6)}MB / ${total ? Math.round(total / 1e6) : '?'}MB (${pct}%)`);
-        lastTick = now;
-      }
-    });
-    res.pipe(writeStream);
-    res.on('end', () => writeStream.close(resolve));
-    res.on('error', err => {
-      writeStream.close();
-      reject(err);
-    });
-  });
-
-  // 簡單檢查
-  if (total && received !== total) {
-    if (retries > 0) {
-      sendLog(`大小不符，重試：${path.basename(dest)}（剩餘重試 ${retries}）`);
-      return downloadWithResume(url, dest, retries - 1);
-    }
-    throw new Error(`Size mismatch for ${path.basename(dest)}`);
-  }
-}
-
-// -------------------- 7z 解壓 --------------------
-function spawnP(cmd, args, opts = {}) {
-  return new Promise((resolve, reject) => {
-    const p = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...opts });
-    p.stdout.on('data', d => sendLog(String(d).trim()));
-    p.stderr.on('data', d => sendLog(String(d).trim()));
-    p.on('close', code => (code === 0 ? resolve() : reject(new Error(`exit ${code}`))));
-  });
-}
-
-async function extract7z(firstPart, outDir) {
-  const pyBase = resolvePythonBase() || '';
-  const seven = path.join(pyBase, 'tools', '7za.exe'); // 請放這個檔
-  if (!fs.existsSync(seven)) {
-    sendLog('未找到 7za.exe（python/tools/7za.exe）。請先放入 7-zip 自解版，或手動解壓。');
-    return false;
-  }
-  await fs.promises.mkdir(outDir, { recursive: true });
-  await spawnP(seven, ['x', firstPart, `-o${outDir}`, '-y']);
-  return true;
-}
-
-// -------------------- 下載模型（可續傳 / 302 兼容 / 分卷） --------------------
-// 這裡改成你的 Release 設定： base URL、檔名前綴、份數（例如 900MB/卷 302 份）
-const BASE_URL = 'https://github.com/<OWNER>/<REPO>/releases/download/<TAG>/';
-const PREFIX   = 'model-pack.7z.'; // 會自動接 001 ~ NNN
-const PARTS    = 19;                // ← 改成你實際份數，例如 302
-const TEMP_DIR = path.join(app.getPath('temp'), 'evi-model-dl');
-
-ipcMain.handle('model:download', async (_e, modelRoot) => {
-  if (!modelRoot) throw new Error('modelRoot is empty');
-  sendLog('開始下載模型 …');
-
-  try {
-    await fs.promises.mkdir(TEMP_DIR, { recursive: true });
-
-    // 逐卷下載
-    for (let i = 1; i <= PARTS; i++) {
-      const idx = String(i).padStart(3, '0');
-      const file = `${PREFIX}${idx}`;
-      const url  = BASE_URL + file;
-      const dest = path.join(TEMP_DIR, file);
-      sendLog(`開始下載：${file}`);
-      await downloadWithResume(url, dest);
-      sendLog(`完成：${file}`);
-    }
-
-    // 解壓（從 .001 觸發會自動串接後面各卷）
-    const first = path.join(TEMP_DIR, `${PREFIX}001`);
-    const out   = path.join(modelRoot, 'sdxl_turbo_1.0'); // 或你想要的資料夾名稱
-    const ok    = await extract7z(first, out);
-
-    if (ok) {
-      sendLog('模型解壓完成 ✓');
-    } else {
-      sendLog('模型下載完成，但未解壓（缺 7za）。請以 7-Zip 將 .001 解壓到：' + out);
-    }
-
-    sendLog('全部完成。');
-    return true;
-  } catch (err) {
-    sendLog('下載/解壓發生錯誤：' + (err && err.message ? err.message : String(err)));
-    throw err;
-  }
-});
-
-// -------------------- 既有 IPC --------------------
-ipcMain.handle('state:get', async () => {
-  return {
-    bootstrap: checkBootstrap(),
-    modelRoot: settings.modelRoot || ''
-  };
-});
-
-ipcMain.handle('model:pick-root', async () => {
-  const ret = await dialog.showOpenDialog(mainWindow, {
-    title: '選擇模型資料夾',
-    properties: ['openDirectory', 'dontAddToRecent']
-  });
-  if (ret.canceled || !ret.filePaths?.[0]) return null;
-  settings.modelRoot = ret.filePaths[0];
-  saveSettings(settings);
-  return settings.modelRoot;
-});
-
-ipcMain.handle('design:start', async (_ev, state) => {
-  await dialog.showMessageBox(mainWindow, {
-    type: 'info',
-    title: 'evi-brush-desktop',
-    message: '生成頁示範：這裡接你的鞋款設計 / Prompt UI 。\n\n' +
-             `bootstrap=${state?.bootstrap}, modelRoot=${state?.modelRoot || ''}`
-  });
-  return true;
-});
-
-// -------------------- Window --------------------
-function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 1140,
-    height: 760,
+let win;
+async function createWindow() {
+  win = new BrowserWindow({
+    width: 1200,
+    height: 800,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
+      preload: path.join(__dirname, 'preload.js'),
+      nodeIntegration: false,
       sandbox: false
     }
   });
-  mainWindow.loadFile(path.join(__dirname, 'index.html'));
-  mainWindow.on('closed', () => { mainWindow = null; });
+  await win.loadFile('index.html');
 }
-app.on('ready', createWindow);
+
+// ---- 下載工具：處理 302 與 Range 續傳 ----
+function httpsGetFollow(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    const maxRedirect = 10;
+    let redirected = 0;
+
+    function once(u) {
+      const req = https.request(u, { method: 'GET', ...options }, res => {
+        // 302 / 301 / 307
+        if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+          if (++redirected > maxRedirect) {
+            reject(new Error('Too many redirects'));
+            return;
+          }
+          const next = new URL(res.headers.location, u).toString();
+          req.destroy();
+          once(next);
+          return;
+        }
+        resolve(res);
+      });
+      req.on('error', reject);
+      req.end();
+    }
+    once(url);
+  });
+}
+
+async function downloadWithResume(url, localFile, onProgress, headers = {}) {
+  // 續傳：若已下載過就從當前大小開始
+  fs.mkdirSync(path.dirname(localFile), { recursive: true });
+  let start = 0;
+  if (exists(localFile)) {
+    start = fs.statSync(localFile).size;
+  }
+
+  const opts = { headers: { ...COMMON_HEADERS, ...headers } };
+  if (start > 0) {
+    opts.headers['Range'] = `bytes=${start}-`;
+  }
+
+  const res = await httpsGetFollow(url, opts);
+  if (![200, 206].includes(res.statusCode)) {
+    throw new Error(`HTTP ${res.statusCode} for ${url}`);
+  }
+
+  const total = Number(res.headers['content-length'] || 0) + start;
+  const ws = fs.createWriteStream(localFile, { flags: 'a' });
+  let read = start;
+
+  return new Promise((resolve, reject) => {
+    res.on('data', chunk => {
+      read += chunk.length;
+      ws.write(chunk);
+      onProgress?.(read, total);
+    });
+    res.on('end', () => ws.end(resolve));
+    res.on('error', reject);
+  });
+}
+
+// ---- 解壓 7z .001 ----
+async function extract7z(firstPartPath, outDir, sendLog) {
+  return new Promise((resolve, reject) => {
+    const exe = get7zExe();
+    const args = ['x', '-y', `-o${outDir}`, firstPartPath];
+    sendLog?.(`[core] 使用 7z 解壓：${exe} ${args.join(' ')}`);
+
+    const child = spawn(exe, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.on('data', d => sendLog?.(d.toString().trimEnd()));
+    child.stderr.on('data', d => sendLog?.(d.toString().trimEnd()));
+    child.on('close', code => {
+      if (code === 0) resolve();
+      else reject(new Error(`7z exit ${code}`));
+    });
+  });
+}
+
+// ---- IPC ----
+ipcMain.handle('state:init', () => {
+  const conf = readConf();
+  return { bootstrap: checkBootstrap(), modelRoot: conf.modelRoot || '' };
+});
+
+ipcMain.handle('model:pick-root', async () => {
+  const ret = await dialog.showOpenDialog({
+    title: '選擇模型目錄',
+    properties: ['openDirectory', 'createDirectory']
+  });
+  if (ret.canceled || !ret.filePaths?.[0]) return '';
+  const root = ret.filePaths[0];
+  writeConf({ ...readConf(), modelRoot: root });
+  return root;
+});
+
+ipcMain.handle('model:download', async (e, { root }) => {
+  const sendLog = msg => e.sender.send('ui:log', msg);
+  const sendProg = p => e.sender.send('ui:progress', p);
+
+  if (!root) throw new Error('modelRoot not set');
+
+  const tmpDir = path.join(root, '.tmp');
+  fs.mkdirSync(tmpDir, { recursive: true });
+
+  sendLog(`[ui] 選擇模型資料夾：${root}`);
+  sendLog(`[ui] 開始下載模型（正式）…`);
+
+  // 下載所有分卷
+  for (let idx = 1; idx <= PARTS; idx++) {
+    const part = String(idx).padStart(3, '0');
+    const name = `${PREFIX}${part}`;
+    const url = `${BASE_URL}${name}`;
+    const local = path.join(tmpDir, name);
+
+    sendLog(`[ui] 下載 ${name} …`);
+    let last = 0;
+    await downloadWithResume(
+      url,
+      local,
+      (read, total) => {
+        const now = Date.now();
+        // 0.2 秒回報一次避免太頻繁
+        if (now - last > 200) {
+          sendProg({ current: idx - 1 + read / (total || 1), total: PARTS });
+          last = now;
+        }
+      }
+    );
+    sendLog(`[ui] 完成 ${name}`);
+    sendProg({ current: idx, total: PARTS });
+  }
+
+  // 解壓第一卷（7z 會自動讀取 .002 …）
+  const first = path.join(tmpDir, `${PREFIX}001`);
+  sendLog('[ui] 下載全部分卷完成，開始解壓…');
+  await extract7z(first, root, sendLog);
+
+  // 清理暫存
+  try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+
+  sendLog('[ui] 模型安裝完成。');
+  return true;
+});
+
+ipcMain.handle('app:open-generator', async () => {
+  dialog.showMessageBox({
+    type: 'info',
+    title: 'EVI Brush Desktop',
+    message: '這裡接入你的鞋款設計 / Prompt 生成 UI。',
+    buttons: ['OK']
+  });
+  return true;
+});
+
+app.whenReady().then(createWindow);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('activate', () => { if (!mainWindow) createWindow(); });
