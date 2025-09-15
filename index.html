@@ -1,41 +1,49 @@
 <!doctype html>
 <html lang="zh-Hant">
-  <head>
-    <meta charset="utf-8" />
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
-    />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>EVI Brush Desktop</title>
-    <style>
-      body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans TC', Arial, 'PingFang TC', 'Microsoft JhengHei', sans-serif; margin: 24px; }
-      h1 { font-size: 48px; margin: 0 0 16px; }
-      .row { margin: 16px 0; display: flex; gap: 12px; align-items: center; }
-      button { padding: 10px 14px; border-radius: 8px; border: 1px solid #cbd5e1; background: #e5edff; cursor: pointer; }
-      .badge { padding: 8px 12px; border-radius: 8px; background: #eef2ff; color: #334155; }
-      .log { background:#0b0f14; color:#cde7c9; padding: 12px; border-radius: 8px; height: 320px; overflow:auto; }
-    </style>
-  </head>
-  <body>
-    <h1>EVI Brush Desktop</h1>
+<head>
+  <meta charset="UTF-8" />
+  <title>EVI Brush Desktop</title>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
 
-    <div class="row">
-      <span id="status" class="badge">Checking...</span>
-    </div>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans TC",
+           "Helvetica Neue", Arial, "PingFang TC", "Heiti TC", "Microsoft JhengHei", sans-serif;
+           margin: 18px; color: #111; }
+    h1 { font-size: 48px; margin: 0 0 12px; }
+    .bar { height: 10px; background: #e5ecfb; border-radius: 8px; margin: 12px 0 18px; position: relative; }
+    .bar::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 62%;
+                  background: linear-gradient(90deg,#79a9ff,#9de2ff); border-radius: 8px; }
+    .row { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
+    button { padding: 10px 16px; border-radius: 10px; border: 1px solid #bcd; background: #eaf1ff;
+             cursor: pointer; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .pill { padding: 8px 12px; border-radius: 999px; background: #eaf1ff; color: #233c6e; }
+    #status.ok { color: #0a7f2e; }
+    #status.warn { color: #b44; }
+    #log { width: 100%; height: 360px; background: #0d0f14; color: #c8f3c8; border: 1px solid #242b3a;
+           border-radius: 8px; padding: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <h1>EVI Brush Desktop</h1>
 
-    <div class="row">
-      <button id="pickBtn">選擇模型資料夾</button>
-      <span class="badge" id="model-root">--</span>
-    </div>
+  <div id="status" class="warn">Checking...</div>
 
-    <div class="row">
-      <button id="downloadBtn" disabled>下載模型（自動續傳 / 302 兼容）</button>
-      <button id="designBtn" disabled>開啟設計 / 生成</button>
-    </div>
+  <div class="row">
+    <button id="pickRootBtn">選擇模型資料夾</button>
+    <span class="pill" id="rootLabel">--</span>
+  </div>
 
-    <div class="log" id="log"></div>
+  <div class="bar"></div>
 
-    <script src="./renderer.js"></script>
-  </body>
+  <div class="row">
+    <button id="downloadBtn">下載模型（自動續傳 / 302 兼容）</button>
+    <button id="designBtn" disabled>開啟設計 / 生成</button>
+  </div>
+
+  <textarea id="log" spellcheck="false" readonly></textarea>
+
+  <script src="./renderer.js"></script>
+</body>
 </html>
