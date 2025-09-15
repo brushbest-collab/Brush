@@ -1,46 +1,41 @@
 <!doctype html>
 <html lang="zh-Hant">
-<head>
-  <meta charset="utf-8" />
-  <meta
-    http-equiv="Content-Security-Policy"
-    content="default-src 'self' https: data:;
-             img-src 'self' data: https:;
-             style-src 'self' 'unsafe-inline';
-             script-src 'self';
-             connect-src 'self' https://api.github.com https://*.githubusercontent.com https://objects.githubusercontent.com;">
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>EVI Brush Desktop</title>
-  <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto; margin:24px}
-    h1{font-size:56px;margin:0 0 10px}
-    .row{display:flex;gap:12px;align-items:center;margin:8px 0}
-    button{padding:10px 16px;border-radius:10px;border:1px solid #c7d8ff;background:#4c88ff;color:#fff;cursor:pointer}
-    button.secondary{background:#e5edff;color:#2a4a9a;border-color:#b9ccff}
-    #rootLabel{padding:8px 12px;background:#eef5ff;border-radius:8px;color:#2e4b7b;min-width:200px;display:inline-block}
-    progress{width:100%;height:10px;border-radius:6px}
-    .terminal{background:#0d1117;color:#bfe0b2;padding:12px;border-radius:10px;height:360px;overflow:auto;font-family:ui-monospace,Consolas,monospace;font-size:13px}
-  </style>
-</head>
-<body>
-  <h1>EVI Brush Desktop</h1>
-  <div id="checking">Checking...</div>
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+    />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>EVI Brush Desktop</title>
+    <style>
+      body { font-family: system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans TC', Arial, 'PingFang TC', 'Microsoft JhengHei', sans-serif; margin: 24px; }
+      h1 { font-size: 48px; margin: 0 0 16px; }
+      .row { margin: 16px 0; display: flex; gap: 12px; align-items: center; }
+      button { padding: 10px 14px; border-radius: 8px; border: 1px solid #cbd5e1; background: #e5edff; cursor: pointer; }
+      .badge { padding: 8px 12px; border-radius: 8px; background: #eef2ff; color: #334155; }
+      .log { background:#0b0f14; color:#cde7c9; padding: 12px; border-radius: 8px; height: 320px; overflow:auto; }
+    </style>
+  </head>
+  <body>
+    <h1>EVI Brush Desktop</h1>
 
-  <div class="row">
-    <button id="btnPick" class="secondary">選擇模型資料夾</button>
-    <span id="rootLabel">--</span>
-  </div>
+    <div class="row">
+      <span id="status" class="badge">Checking...</span>
+    </div>
 
-  <progress id="bar" max="100" value="0"></progress>
+    <div class="row">
+      <button id="pickBtn">選擇模型資料夾</button>
+      <span class="badge" id="model-root">--</span>
+    </div>
 
-  <div class="row">
-    <button id="btnDownload" class="secondary">下載模型（自動續傳 / 302 兼容）</button>
-    <button id="btnGo">開啟設計 / 生成</button>
-  </div>
+    <div class="row">
+      <button id="downloadBtn" disabled>下載模型（自動續傳 / 302 兼容）</button>
+      <button id="designBtn" disabled>開啟設計 / 生成</button>
+    </div>
 
-  <div id="logs" class="terminal"></div>
+    <div class="log" id="log"></div>
 
-  <!-- 注意：使用外部檔案，避免 inline script 被 CSP 擋 -->
-  <script defer src="./renderer/renderer.js"></script>
-</body>
+    <script src="./renderer.js"></script>
+  </body>
 </html>
