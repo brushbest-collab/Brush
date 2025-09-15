@@ -12,7 +12,7 @@
     "clean": "rimraf dist out node_modules/.cache"
   },
   "dependencies": {
-    "electron-store": "^9.1.0",
+    "electron-store": "^8.1.0",
     "fs-extra": "^11.2.0",
     "got": "^13.0.0",
     "progress-stream": "^2.0.0",
