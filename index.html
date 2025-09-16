@@ -1,24 +1,15 @@
-<script>
-  // 如果某次 preload 沒載到，就不讓 UI 直接 throw
-  window.store = window.store || {
-    getState: async () => null,
-    setState: async () => false
-  };
-  window.electron = window.electron || {
-    onLog: () => () => {},
-    openDir: async () => null,
-    invoke: async () => null
-  };
-</script>
-
 <!doctype html>
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8" />
   <title>EVI Brush Desktop</title>
-  <!-- 放寬 CSP，避免 inline script 被擋（你之前的錯誤） -->
+
+  <!-- 放寬 CSP，允許本頁 inline script/style -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline';">
+        content="default-src 'self';
+                 img-src 'self' data:;
+                 style-src 'self' 'unsafe-inline';
+                 script-src 'self' 'unsafe-inline';">
 
   <style>
     body { font-family: system-ui, 'Segoe UI', 'Microsoft JhengHei', sans-serif; margin: 18px; }
@@ -32,6 +23,20 @@
     .bar > .fill { height: 100%; width: 0%; background: linear-gradient(90deg,#3b82f6,#60a5fa); transition: width .15s; }
     pre.log { background:#0f1217; color:#d3ffd3; padding:10px; border-radius:8px; height: 360px; overflow:auto; white-space:pre-wrap; }
   </style>
+
+  <!-- 安全降級：若 preload 沒載到，避免 UI 直接 throw -->
+  <script>
+    window.store = window.store || {
+      getState: async () => null,
+      setState: async () => false
+    };
+    window.electron = window.electron || {
+      onLog: () => () => {},
+      onProgress: () => () => {},
+      openDir: async () => null,
+      invoke: async () => null
+    };
+  </script>
 </head>
 <body>
   <h1>EVI Brush Desktop</h1>
@@ -52,53 +57,68 @@
 
   <pre class="log" id="log"></pre>
 
-<script>
-(async function(){
-  const $ = sel => document.querySelector(sel);
-  const log = (m) => {
-    const el = $('#log');
-    el.textContent += (m + '\n');
-    el.scrollTop = el.scrollHeight;
-  };
+  <script>
+  (async function(){
+    const $ = sel => document.querySelector(sel);
+    const toStr = (m) => (typeof m === 'string') ? m : JSON.stringify(m);
+    const log = (m) => {
+      const el = $('#log');
+      el.textContent += (toStr(m) + '\n');
+      el.scrollTop = el.scrollHeight;
+    };
 
-  // 初始狀態
-  try {
-    const state = await window.evi.getState();
-    $('#txtRoot').value = state.modelRoot || '--';
-    $('#bootstrap').textContent = state.bootstrap ? 'Python bootstrap found.' : 'Python bootstrap not found（請確認安裝包是否完整）';
-  } catch (err) {
-    $('#bootstrap').textContent = '初始化失敗：' + err.message;
-  }
-
-  // 事件
-  $('#btnPick').addEventListener('click', async () => {
+    // --- 初始化：從主程序取狀態 ---
     try {
-      const p = await window.evi.pickModelRoot();
-      $('#txtRoot').value = p;
-      log(`[ui] 選擇模型資料夾：${p}`);
-    } catch(e){}
-  });
+      const modelRoot = await window.store.getState('modelRoot');
+      const bootstrap  = await window.store.getState('bootstrap');
 
-  $('#btnDownload').addEventListener('click', async () => {
-    try {
-      await window.evi.downloadModel();
-      log('[ui] 下載與解壓流程完成。');
+      $('#txtRoot').value = modelRoot || '--';
+      $('#bootstrap').textContent = bootstrap
+        ? 'Python bootstrap found.'
+        : 'Python bootstrap not found（請確認安裝包是否完整）';
     } catch (err) {
-      log(`[ui] 下載/解壓錯誤：${err.message}`);
-      alert('下載/解壓失敗：' + err.message);
+      $('#bootstrap').textContent = '初始化失敗：' + (err?.message || err);
     }
-  });
 
-  $('#btnGo').addEventListener('click', async () => {
-    await window.evi.openDesigner();
-  });
+    // --- 事件：選擇模型資料夾 ---
+    $('#btnPick').addEventListener('click', async () => {
+      try {
+        const p = await window.electron.openDir();
+        if (!p) return;
+        $('#txtRoot').value = p;
+        await window.store.setState('modelRoot', p);
+        log(`[ui] 選擇模型資料夾：${p}`);
+      } catch(e){}
+    });
 
-  // 從主程序接收日志、進度
-  window.evi.onLog((m) => log(m));
-  window.evi.onProgress((p) => {
-    $('#bar').style.width = (p || 0) + '%';
-  });
-})();
-</script>
+    // --- 事件：下載模型（透過通用 IPC invoke）---
+    $('#btnDownload').addEventListener('click', async () => {
+      try {
+        await window.electron.invoke('model:download');
+        log('[ui] 下載與解壓流程完成。');
+      } catch (err) {
+        log(`[ui] 下載/解壓錯誤：${err?.message || err}`);
+        alert('下載/解壓失敗：' + (err?.message || err));
+      }
+    });
+
+    // --- 事件：開啟設計 / 生成 ---
+    $('#btnGo').addEventListener('click', async () => {
+      try {
+        await window.electron.invoke('designer:open');
+      } catch (err) {
+        log(`[ui] 打開設計器錯誤：${err?.message || err}`);
+      }
+    });
+
+    // --- 訂閱：主程序日志 & 進度 ---
+    window.electron.onLog((payload) => log(payload));
+    if (typeof window.electron.onProgress === 'function') {
+      window.electron.onProgress((pct) => {
+        $('#bar').style.width = String(pct || 0) + '%';
+      });
+    }
+  })();
+  </script>
 </body>
 </html>
