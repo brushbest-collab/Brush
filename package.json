@@ -1,64 +1,55 @@
 {
   "name": "evi-brush-desktop",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "EVI Brush Desktop",
-  "main": "main.js",
-  "author": "brushbest-collab",
-  "license": "MIT",
   "private": true,
+  "main": "main.js",
+  "type": "commonjs",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win --x64 --publish never",
-    "clean": "rimraf dist out node_modules/.cache"
+    "start:dev": "set ELECTRON_START_URL=http://localhost:5173&& electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "postinstall": "electron-builder install-app-deps"
   },
-  "dependencies": {
-    "electron-store": "^8.1.0",
-    "fs-extra": "^11.2.0",
-    "got": "^13.0.0",
-    "progress-stream": "^2.0.0",
-    "7zip-bin": "^5.1.1"
-  },
+  "dependencies": {},
   "devDependencies": {
-    "electron": "^30.0.0",
-    "electron-builder": "^24.13.3",
-    "rimraf": "^5.0.5"
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
   },
   "build": {
-    "appId": "com.evi.brush.desktop",
+    "appId": "com.epfootwear.evi-brush-desktop",
     "productName": "EVI Brush Desktop",
+    "directories": {
+      "output": "release"
+    },
+    "asar": true,
     "files": [
       "main.js",
-      "preload.js",
+      "preload.cjs",
       "index.html",
+      "dist/**",
       "build/**",
-      "!**/*.map",
-      "!**/*.md",
-      "!.git/**",
-      "!.github/**"
+      "!node_modules/.cache/**"
     ],
-    "asar": true,
-    "asarUnpack": [
-      "**/node_modules/7zip-bin/**"
-    ],
-    "directories": {
-      "output": "dist"
+    "extraMetadata": {
+      "main": "main.js"
     },
-    "extraResources": [],
     "win": {
-      "icon": "build/icon.ico",
       "target": [
-        "nsis",
-        "portable"
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "nsis": {
       "oneClick": true,
       "perMachine": false,
       "allowToChangeInstallationDirectory": false,
-      "createDesktopShortcut": true,
-      "shortcutName": "EVI Brush Desktop",
-      "runAfterFinish": true,
-      "uninstallDisplayName": "EVI Brush Desktop"
+      "artifactName": "evi-brush-desktop-${version}-Setup.${ext}"
     }
   }
 }
