@@ -1,30 +1,25 @@
-// main.js
+// main.js —— 覆蓋版（總是設定 preload）
 const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 let win;
 
-// —— IPC：最小可用的 state / dialog / log
+// 極簡狀態存取，給 preload->renderer 用
 const _state = new Map();
 ipcMain.handle('state:get', (_e, key) => _state.get(key));
 ipcMain.handle('state:set', (_e, { key, val }) => { _state.set(key, val); return true; });
+
 ipcMain.handle('dialog:openDir', async () => {
   const r = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
   return r.canceled ? null : r.filePaths[0];
 });
-// 範例：你要往前端輸出訊息就呼叫這個
-function sendLog(msg, level = 'info') {
-  if (win && !win.isDestroyed()) win.webContents.send('log', { level, msg, ts: Date.now() });
-}
 
-function pickExisting(paths) { for (const p of paths) { if (fs.existsSync(p)) return p; } return null; }
+function pickExisting(paths) { for (const p of paths) if (fs.existsSync(p)) return p; return null; }
 
 async function loadRenderer(w) {
-  if (process.env.ELECTRON_START_URL) {
-    await w.loadURL(process.env.ELECTRON_START_URL);
-    return;
-  }
+  if (process.env.ELECTRON_START_URL) { await w.loadURL(process.env.ELECTRON_START_URL); return; }
+
   const candidates = [
     path.join(__dirname, 'index.html'),
     path.join(__dirname, 'build', 'index.html'),
@@ -45,22 +40,22 @@ async function loadRenderer(w) {
 }
 
 async function createWindow() {
+  // ✅ 不再做 exists 檢查：asar 環境下可能回傳 false
   const preloadPath = path.join(__dirname, 'preload.cjs');
-  const hasPreload = fs.existsSync(preloadPath);
+  console.log('[electron] preload path =', preloadPath);
 
   win = new BrowserWindow({
     width: 1200,
     height: 800,
     webPreferences: {
-      preload: hasPreload ? preloadPath : undefined, // 沒檔案就不指定，避免 ENOENT
+      preload: preloadPath,         // ← 一律設定
       nodeIntegration: false,
       contextIsolation: true,
       devTools: true,
     },
-    show: true
+    show: true,
   });
 
-  win.webContents.on('did-finish-load', () => sendLog('renderer loaded'));
   win.webContents.on('did-fail-load', (_e, code, desc, url) => {
     dialog.showErrorBox('did-fail-load', `code=${code}\n${desc}\nurl=${url}`);
   });
@@ -68,12 +63,10 @@ async function createWindow() {
   win.webContents.openDevTools({ mode: 'detach' });
   await loadRenderer(win);
 
-  // 初始化一些狀態（可選）
   _state.set('appReady', true);
-  sendLog('app ready');
 }
 
 process.on('uncaughtException', (err) => dialog.showErrorBox('Main Error', String(err?.stack || err)));
 app.whenReady().then(createWindow);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+app.on('activate', () => { if
