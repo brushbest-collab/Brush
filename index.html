@@ -1,3 +1,16 @@
+<script>
+  // 如果某次 preload 沒載到，就不讓 UI 直接 throw
+  window.store = window.store || {
+    getState: async () => null,
+    setState: async () => false
+  };
+  window.electron = window.electron || {
+    onLog: () => () => {},
+    openDir: async () => null,
+    invoke: async () => null
+  };
+</script>
+
 <!doctype html>
 <html lang="zh-Hant">
 <head>
