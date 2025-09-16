@@ -14,7 +14,7 @@
   "dependencies": {
     "electron-store": "^8.1.0",
     "fs-extra": "^11.2.0",
-    "got": "^13.0.0",
+    "got": "^12.6.1",
     "progress-stream": "^2.0.0",
     "7zip-bin": "^5.1.1"
   },
