@@ -62,7 +62,13 @@ jobs:
         if: ${{ hashFiles('package.json') != '' }}
         shell: pwsh
         run: |
-          npx electron-builder --win nsis portable --x64 --publish never
+          npx electron-builder --win nsis portable --x64 --publish never --config.directories.output=dist
+
+      - name: List app artifacts
+        shell: pwsh
+        run: |
+          Write-Host "== dist contents =="
+          if (Test-Path dist) { Get-ChildItem -Recurse dist | ForEach-Object { $_.FullName } } else { Write-Host "dist not found" }
 
       # ---------------- Compute tag ----------------
       - name: Compute tag
@@ -84,7 +90,6 @@ jobs:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: ${{ steps.tag.outputs.tag }}
           prerelease: ${{ inputs.prerelease }}
-          # 這裡會抓 NSIS 安裝檔 + Portable exe + 其他壓縮檔（視你的 build 設定而定）
           files: |
             dist/*Setup*.exe
             dist/*-portable*.exe
@@ -136,7 +141,6 @@ jobs:
           if (-not (Test-Path $seven)) { throw "7z.exe not found" }
           $src = Join-Path (Get-Location).Path 'python\models\sd-turbo\*'
           $dst = Join-Path (Get-Location).Path 'dist\model-pack.7z'
-          # -mx=1 較快；若要更高壓縮可改 -mx=5~9，時間會變長
           & $seven a -t7z -m0=lzma2 -mx=1 -ms=off -v900m $dst $src
           if ($LASTEXITCODE -ne 0) { throw "7z create failed: $LASTEXITCODE" }
 
