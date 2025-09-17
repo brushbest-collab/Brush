@@ -28,6 +28,7 @@
       "main.js",
       "preload.cjs",
       "index.html",
+      "app.config.json",
       "dist/**",
       "build/**",
       "!node_modules/.cache/**"
