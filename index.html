@@ -3,10 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <title>EVI Brush Desktop</title>
-
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline';">
-
   <style>
     body { font-family: system-ui, 'Segoe UI', 'Microsoft JhengHei', sans-serif; margin: 18px; }
     h1 { font-size: 40px; margin: 0 0 10px; }
@@ -19,8 +17,6 @@
     .bar > .fill { height: 100%; width: 0%; background: linear-gradient(90deg,#3b82f6,#60a5fa); transition: width .15s; }
     pre.log { background:#0f1217; color:#d3ffd3; padding:10px; border-radius:8px; height: 360px; overflow:auto; white-space:pre-wrap; }
   </style>
-
-  <!-- 安全降級：若 preload 沒載到，避免 UI 直接 throw -->
   <script>
     window.store = window.store || { getState: async () => null, setState: async () => false };
     window.electron = window.electron || { onLog: () => () => {}, onProgress: () => () => {}, openDir: async () => null, invoke: async () => null };
@@ -28,7 +24,6 @@
 </head>
 <body>
   <h1>EVI Brush Desktop</h1>
-
   <div class="hint" id="bootstrap">Checking...</div>
 
   <div class="row">
@@ -48,51 +43,38 @@
   <script>
   (async function(){
     const $ = sel => document.querySelector(sel);
-    const toStr = (m) => (typeof m === 'string') ? m : JSON.stringify(m);
-    const log = (m) => { const el = $('#log'); el.textContent += (toStr(m) + '\n'); el.scrollTop = el.scrollHeight; };
+    const log = (m) => { const el = $('#log'); el.textContent += ((typeof m==='string'?m:JSON.stringify(m)) + '\n'); el.scrollTop = el.scrollHeight; };
 
-    // 初始化
     try {
       const modelRoot = await window.store.getState('modelRoot');
       const bootstrap  = await window.store.getState('bootstrap');
       $('#txtRoot').value = modelRoot || '--';
       $('#bootstrap').textContent = bootstrap ? 'Python bootstrap found.' : 'Python bootstrap not found（請確認安裝包是否完整）';
-    } catch (err) {
-      $('#bootstrap').textContent = '初始化失敗：' + (err?.message || err);
-    }
+    } catch (err) { $('#bootstrap').textContent = '初始化失敗：' + (err?.message || err); }
 
-    // 選資料夾
     $('#btnPick').addEventListener('click', async () => {
-      try {
-        const p = await window.electron.openDir();
-        if (!p) return;
-        $('#txtRoot').value = p;
-        await window.store.setState('modelRoot', p);
-        log(`[ui] 選擇模型資料夾：${p}`);
-      } catch(e){}
+      const p = await window.electron.openDir();
+      if (!p) return;
+      $('#txtRoot').value = p;
+      await window.store.setState('modelRoot', p);
+      log(`[ui] 選擇模型資料夾：${p}`);
     });
 
-    // 下載 / 解壓
     $('#btnDownload').addEventListener('click', async () => {
       try {
         const res = await window.electron.invoke('model:download');
-        if (res === true) {
-          log('[ui] 下載與解壓流程完成。');
-        } else if (res === 'cancelled') {
-          log('[ui] 已取消。若要用本機分卷，請把 model-pack.7z.001~N 置於同一資料夾，再選第1個 .001 檔。');
-        }
+        if (res === true) log('[ui] 下載與解壓流程完成。');
+        else if (res === 'cancelled') log('[ui] 已取消。若要用本機分卷，請把 model-pack.7z.001~N 置於同一資料夾，再選第 1 個 .001 檔。');
       } catch (err) {
         log(`[ui] 下載/解壓錯誤：${err?.message || err}`);
         alert('下載/解壓失敗：' + (err?.message || err));
       }
     });
 
-    // 打開設計器
     $('#btnGo').addEventListener('click', async () => {
       try { await window.electron.invoke('designer:open'); } catch (err) { log(`[ui] 打開設計器錯誤：${err?.message || err}`); }
     });
 
-    // 日志 & 進度
     window.electron.onLog((payload) => log(payload));
     window.electron.onProgress((pct) => { $('#bar').style.width = String(pct || 0) + '%'; });
   })();
