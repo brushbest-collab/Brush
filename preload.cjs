@@ -1,13 +1,11 @@
-// preload.cjs —— 覆蓋版
+// preload.cjs —— 暴露給渲染端的 API（可直接覆蓋）
 const { contextBridge, ipcRenderer } = require('electron');
 
-try {
-  console.log('[preload] loaded');
-} catch {}
+try { console.log('[preload] loaded'); } catch {}
 
 contextBridge.exposeInMainWorld('store', {
   getState: (key) => ipcRenderer.invoke('state:get', key),
-  setState: (key, val) => ipcRenderer.invoke('state:set', { key, val }),
+  setState: (key, val) => ipcRenderer.invoke('state:set', { key, val })
 });
 
 contextBridge.exposeInMainWorld('electron', {
@@ -17,6 +15,12 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.on('log', listener);
     return () => ipcRenderer.removeListener('log', listener);
   },
+  onProgress: (cb) => {
+    if (typeof cb !== 'function') return () => {};
+    const listener = (_e, v) => cb(v);
+    ipcRenderer.on('progress', listener);
+    return () => ipcRenderer.removeListener('progress', listener);
+  },
   openDir: () => ipcRenderer.invoke('dialog:openDir'),
-  invoke: (channel, data) => ipcRenderer.invoke(channel, data),
+  invoke: (channel, data) => ipcRenderer.invoke(channel, data)
 });
