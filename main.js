@@ -1,34 +1,19 @@
-// main.js —— 穩定版（請整檔覆蓋）
+// main.js —— 含 bootstrap 偵測（覆蓋/合併用）
 const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 let win = null;
-
-// --- 簡易全域狀態（給 preload/renderer 讀寫） ---
 const state = new Map();
 
-// 安全傳訊
-function send(channel, payload) {
-  if (win && !win.isDestroyed()) {
-    try { win.webContents.send(channel, payload); } catch (_) {}
-  }
-}
+function send(channel, payload){ if (win && !win.isDestroyed()) win.webContents.send(channel, payload); }
+function log(msg, level='info'){ send('log', { level, msg, ts: Date.now() }); }
+function progress(p){ send('progress', p); }
 
-function log(msg, level = 'info') {
-  send('log', { level, msg, ts: Date.now() });
-}
-function progress(pct) { send('progress', pct); }
+function pickExisting(paths){ for (const p of paths){ try{ if (fs.existsSync(p)) return p; } catch(_){} } return null; }
 
-function pickExisting(paths) {
-  for (const p of paths) { try { if (fs.existsSync(p)) return p; } catch(_) {} }
-  return null;
-}
-
-async function loadRenderer(w) {
-  if (process.env.ELECTRON_START_URL) { await w.loadURL(process.env.ELECTRON_START_URL); return; }
-
-  const candidates = [
+function resolveHtml(){
+  const c = [
     path.join(__dirname, 'index.html'),
     path.join(__dirname, 'build', 'index.html'),
     path.join(__dirname, 'dist', 'index.html'),
@@ -39,78 +24,70 @@ async function loadRenderer(w) {
     path.join(process.resourcesPath, 'app.asar', 'build', 'index.html'),
     path.join(process.resourcesPath, 'app.asar', 'dist', 'index.html'),
   ];
-  const html = pickExisting(candidates);
+  return pickExisting(c);
+}
+
+/* ✅ 這段：同時支援 DEV、打包到 app.asar.unpacked、或 extraResources/python/ */
+function findPythonBootstrapMarker(){
+  const c = [
+    path.join(__dirname, 'python', 'pbs', 'ok'),                               // dev
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'python', 'pbs', 'ok'), // asarUnpack
+    path.join(process.resourcesPath, 'app', 'python', 'pbs', 'ok'),              // 某些打包配置
+    path.join(process.resourcesPath, 'python', 'pbs', 'ok')                      // extraResources（推薦）
+  ];
+  return pickExisting(c);
+}
+
+function detectBootstrap(){
+  const marker = findPythonBootstrapMarker();
+  const found = !!marker;
+  state.set('bootstrap', found);
+  log(found ? `Python bootstrap marker FOUND: ${marker}` : 'Python bootstrap NOT found');
+  return found;
+}
+
+async function loadRenderer(w){
+  if (process.env.ELECTRON_START_URL) { await w.loadURL(process.env.ELECTRON_START_URL); return; }
+  const html = resolveHtml();
   if (!html) {
-    dialog.showErrorBox('Renderer 未找到', candidates.join('\n'));
+    dialog.showErrorBox('Renderer 未找到', '沒有找到 index.html');
     return;
   }
   await w.loadFile(html);
 }
 
-async function createWindow() {
-  // ✅ 一律指定 preload（不要做 exists 檢查，asar 下可能判斷錯）
+async function createWindow(){
   const preloadPath = path.join(__dirname, 'preload.cjs');
 
   win = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    show: true,
-    webPreferences: {
-      preload: preloadPath,
-      nodeIntegration: false,
-      contextIsolation: true,
-      devTools: true,
-    },
+    width: 1200, height: 800, show: true,
+    webPreferences: { preload: preloadPath, nodeIntegration: false, contextIsolation: true, devTools: true }
   });
 
-  // 外部連結用預設瀏覽器開啟
   win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
-
-  win.webContents.on('did-fail-load', (_e, code, desc, url) => {
-    dialog.showErrorBox('did-fail-load', `code=${code}\n${desc}\nurl=${url}`);
-  });
-
-  // 如需除錯可開啟
-  // win.webContents.openDevTools({ mode: 'detach' });
+  win.webContents.on('did-fail-load', (_e, code, desc, url) => dialog.showErrorBox('did-fail-load', `code=${code}\n${desc}\nurl=${url}`));
 
   await loadRenderer(win);
 
-  // 初始化預設狀態
-  if (!state.has('bootstrap')) state.set('bootstrap', false);
+  // 初始化狀態
   if (!state.has('modelRoot')) state.set('modelRoot', null);
+  detectBootstrap(); // ✅ 啟動即偵測並更新狀態
 }
 
-// ---------- IPC：renderer 互動 ----------
+// ---------- IPC ----------
 ipcMain.handle('state:get', (_e, key) => state.get(key));
 ipcMain.handle('state:set', (_e, { key, val }) => { state.set(key, val); return true; });
-
 ipcMain.handle('dialog:openDir', async () => {
   const r = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
   return r.canceled ? null : r.filePaths[0];
 });
-
-// 範例：下載流程（可自行換成真實邏輯）
 ipcMain.handle('model:download', async () => {
-  log('Start download…');
-  for (let i = 0; i <= 100; i += 5) {
-    progress(i);
-    await new Promise(r => setTimeout(r, 40));
-  }
-  log('Download finished.');
-  return true;
+  log('Start download…'); for (let i=0;i<=100;i+=5){ progress(i); await new Promise(r=>setTimeout(r,30)); }
+  log('Download finished.'); return true;
 });
+ipcMain.handle('designer:open', async () => { log('Open designer.'); return true; });
 
-// 範例：開啟設計器
-ipcMain.handle('designer:open', async () => {
-  log('Open designer.');
-  return true;
-});
-
-// 全域錯誤兜底
-process.on('uncaughtException', (err) => {
-  dialog.showErrorBox('Main Error', String((err && err.stack) || err));
-});
-
+process.on('uncaughtException', (err) => dialog.showErrorBox('Main Error', String((err && err.stack) || err)));
 app.whenReady().then(createWindow);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
