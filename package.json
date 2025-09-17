@@ -22,9 +22,7 @@
   "build": {
     "appId": "com.epfootwear.evi-brush-desktop",
     "productName": "EVI Brush Desktop",
-    "directories": {
-      "output": "dist"
-    },
+    "directories": { "output": "dist" },
     "asar": true,
     "files": [
       "main.js",
@@ -35,22 +33,11 @@
       "!node_modules/.cache/**"
     ],
     "extraResources": [
-      {
-        "from": "python/",
-        "to": "python",
-        "filter": ["**/*"]
-      }
+      { "from": "python/", "to": "python", "filter": ["**/*"] }
     ],
-    "asarUnpack": [
-      "python/**"
-    ],
+    "asarUnpack": ["python/**"],
     "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": ["x64"]
-        }
-      ],
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
       "artifactName": "evi-brush-desktop-${version}-Setup.${ext}"
     },
     "nsis": {
