@@ -61,4 +61,226 @@ function findBootstrapMarker(){
 }
 function detectBootstrap(){
   const marker = findBootstrapMarker();
-  const found = !!ma
+  const found = !!marker;
+  state.set('bootstrap', found);
+  log(found ? `Python bootstrap marker FOUND: ${marker}` : 'Python bootstrap NOT found');
+  return found;
+}
+
+/* ---------------- GitHub Release 下載 ---------------- */
+// 自動以 app 版本推斷 tag：v{appVersion}；也可用環境變數覆蓋
+function ghConfig() {
+  const repo = process.env.GH_REPO || 'brushbest-collab/evi-brush-desktop'; // ←改成你的 repo（owner/name）
+  let tag = process.env.GH_TAG;
+  if (!tag) { try { tag = 'v' + app.getVersion(); } catch { tag = ''; } }
+  return { repo, tag };
+}
+
+// 取 Release assets（model-pack.7z.001..N）
+function fetchModelAssets(repo, tag) {
+  return new Promise((resolve) => {
+    if (!repo || !tag) return resolve([]);
+    const api = `https://api.github.com/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`;
+    const req = https.get(api, {
+      headers: { 'User-Agent': 'evi-brush-desktop', 'Accept': 'application/vnd.github+json' },
+      timeout: 15000
+    }, (res) => {
+      // redirect
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume(); // drain
+        return resolve(fetchModelAssetsFromUrl(res.headers.location));
+      }
+      if (res.statusCode !== 200) { res.resume(); return resolve([]); }
+      let buf = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => buf += c);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(buf);
+          const assets = Array.isArray(json.assets) ? json.assets : [];
+          const urls = assets
+            .filter(a => /model-pack\.7z\.\d{3}$/i.test(a.name))
+            .sort((a,b) => {
+              const na = Number(a.name.match(/(\d{3})$/)[1]);
+              const nb = Number(b.name.match(/(\d{3})$/)[1]);
+              return na - nb;
+            })
+            .map(a => a.browser_download_url);
+          resolve(urls);
+        } catch { resolve([]); }
+      });
+    });
+    req.on('error', () => resolve([]));
+    req.on('timeout', () => { req.destroy(); resolve([]); });
+  });
+}
+function fetchModelAssetsFromUrl(url){
+  // 當 GitHub 回 302 時從 location 直接再打
+  return new Promise((resolve)=>{
+    const req = https.get(url, { headers:{'User-Agent':'evi-brush-desktop','Accept':'application/vnd.github+json'}, timeout:15000 }, (res)=>{
+      if (res.statusCode !== 200){ res.resume(); return resolve([]); }
+      let buf=''; res.setEncoding('utf8');
+      res.on('data', c=> buf+=c);
+      res.on('end', ()=>{
+        try{
+          const json = JSON.parse(buf);
+          const assets = Array.isArray(json.assets)?json.assets:[];
+          const urls = assets
+            .filter(a => /model-pack\.7z\.\d{3}$/i.test(a.name))
+            .sort((a,b) => {
+              const na = Number(a.name.match(/(\d{3})$/)[1]);
+              const nb = Number(b.name.match(/(\d{3})$/)[1]);
+              return na - nb;
+            })
+            .map(a => a.browser_download_url);
+          resolve(urls);
+        }catch{ resolve([]); }
+      });
+    });
+    req.on('error', ()=>resolve([]));
+    req.on('timeout', ()=>{ req.destroy(); resolve([]); });
+  });
+}
+
+/* ---------------- 下載/解壓工具 ---------------- */
+function httpDownload(fileUrl, destPath, onProgress){
+  return new Promise((resolve, reject)=>{
+    const doGet = (url)=>{
+      const file = fs.createWriteStream(destPath);
+      const req = https.get(url, { headers: { 'User-Agent': 'evi-brush-desktop' } }, (res)=>{
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          file.close(); fs.unlink(destPath, ()=>{}); return doGet(res.headers.location);
+        }
+        if (res.statusCode !== 200){ file.close(); fs.unlink(destPath, ()=>{}); return reject(new Error(`HTTP ${res.statusCode} for ${url}`)); }
+        const total = Number(res.headers['content-length']||0); let rec=0;
+        res.on('data', ch=>{ rec+=ch.length; if(total && onProgress) onProgress(Math.round(rec*100/total)); });
+        res.pipe(file); file.on('finish', ()=>file.close(()=>resolve(destPath)));
+      });
+      req.on('error', err=>{ file.close(); fs.unlink(destPath, ()=>{}); reject(err); });
+    };
+    doGet(fileUrl);
+  });
+}
+function sevenExtract(firstPartPath, outDir){
+  return new Promise((resolve,reject)=>{
+    const proc = spawn(sevenPath, ['x', firstPartPath, `-o${outDir}`, '-y']);
+    proc.stdout.on('data', d=>log(String(d)));
+    proc.stderr.on('data', d=>log(String(d),'warn'));
+    proc.on('close', code => code===0 ? resolve(true) : reject(new Error(`7z exit ${code}`)));
+  });
+}
+
+/* ---------------- Python 啟動 ---------------- */
+function findPythonExe(){
+  const c = [
+    process.env.EVI_PYTHON_EXE && path.normalize(process.env.EVI_PYTHON_EXE),
+    path.join(process.resourcesPath,'python','python.exe'),
+    path.join(process.resourcesPath,'app.asar.unpacked','python','python.exe'),
+    path.join(__dirname,'python','python.exe')
+  ].filter(Boolean);
+  return pickExisting(c);
+}
+function findEntryScript(){
+  const c = [
+    process.env.EVI_PY_ENTRY && path.normalize(process.env.EVI_PY_ENTRY),
+    path.join(process.resourcesPath,'python','pbs','serve.py'),
+    path.join(process.resourcesPath,'app.asar.unpacked','python','pbs','serve.py'),
+    path.join(__dirname,'python','pbs','serve.py')
+  ].filter(Boolean);
+  return pickExisting(c);
+}
+let pyProc = null;
+
+/* ---------------- IPC ---------------- */
+ipcMain.handle('state:get', (_e,key)=>state.get(key));
+ipcMain.handle('state:set', (_e,{key,val})=>{ state.set(key,val); return true; });
+
+ipcMain.handle('dialog:openDir', async ()=>{
+  const r = await dialog.showOpenDialog({ properties:['openDirectory','createDirectory'] });
+  return r.canceled ? null : r.filePaths[0];
+});
+
+ipcMain.handle('model:download', async ()=>{
+  const root = state.get('modelRoot');
+  if (!root) throw new Error('請先選擇模型資料夾');
+
+  // 1) 優先嘗試 GitHub Release
+  const { repo, tag } = ghConfig();
+  let urls = await fetchModelAssets(repo, tag);
+
+  if (urls.length > 0) {
+    try{
+      const tmp = path.join(root, '_dl_tmp'); fs.mkdirSync(tmp,{recursive:true});
+      log(`Found ${urls.length} parts on GitHub (${repo} @ ${tag}). Start download…`);
+      for (let i=0;i<urls.length;i++){
+        const url = urls[i];
+        const fname = path.basename(url);
+        const out = path.join(tmp, fname);
+        log(`Downloading ${fname}`);
+        await httpDownload(url, out, pct=>{
+          const base = (i/urls.length)*100;
+          progress(Math.min(99, Math.floor(base + pct/urls.length)));
+        });
+      }
+      const first = path.join(tmp, path.basename(urls[0]));
+      log('Extracting with 7z…');
+      await sevenExtract(first, root);
+      progress(100); log('Download finished.');
+      try{ fs.rmSync(tmp,{recursive:true,force:true}); }catch{}
+      return true;
+    }catch(err){
+      log(`Online download failed: ${err.message}`, 'error');
+      // fall through to local picker
+    }
+  } else {
+    log('No online model assets found (OK if private/offline).');
+  }
+
+  // 2) 後備：本機分卷（選第一個 .001）
+  log('Fallback to local .7z.001 picker.');
+  const r = await dialog.showOpenDialog({
+    title: '選擇 model-pack.7z.001',
+    properties: ['openFile'],
+    filters: [{ name: '7z split first part', extensions: ['001'] }]
+  });
+  if (r.canceled || !r.filePaths[0]) { log('User cancelled picker.'); return 'cancelled'; }
+  const firstPartPath = r.filePaths[0];
+  log(`Extract from local: ${firstPartPath}`);
+  await sevenExtract(firstPartPath, root);
+  progress(100); log('Local extract finished.');
+  return true;
+});
+
+ipcMain.handle('designer:open', async ()=>{
+  try{
+    if (pyProc && !pyProc.killed){
+      log('Python service already running.');
+    } else {
+      const py = findPythonExe();
+      const entry = findEntryScript();
+      if (py && entry){
+        log(`Start python: ${py} ${entry}`);
+        pyProc = spawn(py, [entry], { cwd: path.dirname(entry) });
+        pyProc.stdout.on('data', d=>log(`[py] ${String(d).trim()}`));
+        pyProc.stderr.on('data', d=>log(`[py-err] ${String(d).trim()}`, 'warn'));
+        pyProc.on('close', c=>log(`[py] exit ${c}`));
+      } else {
+        log('Python exe or entry not found — open URL directly.', 'warn');
+      }
+    }
+    const url = process.env.DESIGNER_URL || 'http://127.0.0.1:8000';
+    const child = new BrowserWindow({ width: 1280, height: 800 });
+    await child.loadURL(url);
+    log('Open designer.');
+    return true;
+  }catch(err){
+    log(`Open designer error: ${err.message}`, 'error');
+    throw err;
+  }
+});
+
+/* ---------------- 啟動 ---------------- */
+process.on('uncaughtException', err => dialog.showErrorBox('Main Error', String((err && err.stack) || err)));
+app.whenReady().then(createWindow);
+app.on('window-all-closed', ()=>{ if (process.platform !== 'darwin') app.quit(); });
+app.on('activate', ()=>{ if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
