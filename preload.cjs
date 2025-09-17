@@ -1,4 +1,4 @@
-// preload.cjs —— 暴露給渲染端的 API（可直接覆蓋）
+// preload.cjs
 const { contextBridge, ipcRenderer } = require('electron');
 
 try { console.log('[preload] loaded'); } catch {}
