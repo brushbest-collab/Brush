@@ -1,10 +1,10 @@
-// main.js —— 最佳解法版：GitHub Release 自動下載 + 本機分卷後備
+// main.js —— GitHub 私有 Release + 本機分卷備援
 const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
 const { spawn } = require('child_process');
-const sevenBin = require('7zip-bin');           // 內建 7z
+const sevenBin = require('7zip-bin');
 const sevenPath = sevenBin.path7za;
 
 let win = null;
@@ -42,8 +42,8 @@ async function createWindow(){
     width: 1200, height: 800, show: true,
     webPreferences: { preload: path.join(__dirname,'preload.cjs'), nodeIntegration:false, contextIsolation:true, devTools:true }
   });
-  win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action:'deny' }; });
-  win.webContents.on('did-fail-load', (_e, code, desc, url) => dialog.showErrorBox('did-fail-load', `code=${code}\n${desc}\nurl=${url}`));
+  win.webContents.setWindowOpenHandler(({url})=>{ shell.openExternal(url); return {action:'deny'}; });
+  win.webContents.on('did-fail-load',(_e,code,desc,url)=>dialog.showErrorBox('did-fail-load',`code=${code}\n${desc}\nurl=${url}`));
   await loadRenderer(win);
   if (!state.has('modelRoot')) state.set('modelRoot', null);
   detectBootstrap();
@@ -67,46 +67,42 @@ function detectBootstrap(){
   return found;
 }
 
-/* ---------------- GitHub Release 下載 ---------------- */
-// 自動以 app 版本推斷 tag：v{appVersion}；也可用環境變數覆蓋
+/* ---------------- GitHub Release（支援私有） ---------------- */
+// 以 app 版本推斷 tag：v{appVersion}；可用環境變數覆蓋：GH_REPO / GH_TAG / GH_TOKEN
 function ghConfig() {
-  const repo = process.env.GH_REPO || 'brushbest-collab/evi-brush-desktop'; // ←改成你的 repo（owner/name）
-  let tag = process.env.GH_TAG;
+  const repo  = process.env.GH_REPO || 'owner/repo'; // ←改成你的預設 repo
+  let tag     = process.env.GH_TAG;
   if (!tag) { try { tag = 'v' + app.getVersion(); } catch { tag = ''; } }
-  return { repo, tag };
+  const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || '';
+  return { repo, tag, token };
 }
 
-// 取 Release assets（model-pack.7z.001..N）
-function fetchModelAssets(repo, tag) {
+// 取得 release assets（包含私有 repo）：回傳 [{name, id, publicUrl, apiUrl}]
+function fetchReleaseAssets(repo, tag, token) {
   return new Promise((resolve) => {
     if (!repo || !tag) return resolve([]);
     const api = `https://api.github.com/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`;
-    const req = https.get(api, {
-      headers: { 'User-Agent': 'evi-brush-desktop', 'Accept': 'application/vnd.github+json' },
-      timeout: 15000
-    }, (res) => {
-      // redirect
+    const headers = { 'User-Agent':'evi-brush-desktop', 'Accept':'application/vnd.github+json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const req = https.get(api, { headers, timeout: 15000 }, (res) => {
+      // 跟隨 3xx
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        res.resume(); // drain
-        return resolve(fetchModelAssetsFromUrl(res.headers.location));
+        res.resume();
+        return fetchReleaseAssetsFromUrl(res.headers.location, token).then(resolve);
       }
       if (res.statusCode !== 200) { res.resume(); return resolve([]); }
-      let buf = '';
-      res.setEncoding('utf8');
-      res.on('data', (c) => buf += c);
+      let buf=''; res.setEncoding('utf8');
+      res.on('data', c => buf+=c);
       res.on('end', () => {
         try {
           const json = JSON.parse(buf);
           const assets = Array.isArray(json.assets) ? json.assets : [];
-          const urls = assets
+          const list = assets
             .filter(a => /model-pack\.7z\.\d{3}$/i.test(a.name))
-            .sort((a,b) => {
-              const na = Number(a.name.match(/(\d{3})$/)[1]);
-              const nb = Number(b.name.match(/(\d{3})$/)[1]);
-              return na - nb;
-            })
-            .map(a => a.browser_download_url);
-          resolve(urls);
+            .sort((a,b) => Number(a.name.match(/(\d{3})$/)[1]) - Number(b.name.match(/(\d{3})$/)[1]))
+            .map(a => ({ name:a.name, id:a.id, publicUrl:a.browser_download_url, apiUrl:a.url }));
+          resolve(list);
         } catch { resolve([]); }
       });
     });
@@ -114,26 +110,23 @@ function fetchModelAssets(repo, tag) {
     req.on('timeout', () => { req.destroy(); resolve([]); });
   });
 }
-function fetchModelAssetsFromUrl(url){
-  // 當 GitHub 回 302 時從 location 直接再打
+function fetchReleaseAssetsFromUrl(url, token){
   return new Promise((resolve)=>{
-    const req = https.get(url, { headers:{'User-Agent':'evi-brush-desktop','Accept':'application/vnd.github+json'}, timeout:15000 }, (res)=>{
+    const headers = { 'User-Agent':'evi-brush-desktop', 'Accept':'application/vnd.github+json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const req = https.get(url, { headers, timeout:15000 }, (res)=>{
       if (res.statusCode !== 200){ res.resume(); return resolve([]); }
       let buf=''; res.setEncoding('utf8');
       res.on('data', c=> buf+=c);
       res.on('end', ()=>{
         try{
           const json = JSON.parse(buf);
-          const assets = Array.isArray(json.assets)?json.assets:[];
-          const urls = assets
+          const assets = Array.isArray(json.assets) ? json.assets : [];
+          const list = assets
             .filter(a => /model-pack\.7z\.\d{3}$/i.test(a.name))
-            .sort((a,b) => {
-              const na = Number(a.name.match(/(\d{3})$/)[1]);
-              const nb = Number(b.name.match(/(\d{3})$/)[1]);
-              return na - nb;
-            })
-            .map(a => a.browser_download_url);
-          resolve(urls);
+            .sort((a,b) => Number(a.name.match(/(\d{3})$/)[1]) - Number(b.name.match(/(\d{3})$/)[1]))
+            .map(a => ({ name:a.name, id:a.id, publicUrl:a.browser_download_url, apiUrl:a.url }));
+          resolve(list);
         }catch{ resolve([]); }
       });
     });
@@ -142,23 +135,20 @@ function fetchModelAssetsFromUrl(url){
   });
 }
 
-/* ---------------- 下載/解壓工具 ---------------- */
-function httpDownload(fileUrl, destPath, onProgress){
+/* ---------------- 下載/解壓 ---------------- */
+function httpDownload(url, destPath, headers){
   return new Promise((resolve, reject)=>{
-    const doGet = (url)=>{
-      const file = fs.createWriteStream(destPath);
-      const req = https.get(url, { headers: { 'User-Agent': 'evi-brush-desktop' } }, (res)=>{
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          file.close(); fs.unlink(destPath, ()=>{}); return doGet(res.headers.location);
-        }
-        if (res.statusCode !== 200){ file.close(); fs.unlink(destPath, ()=>{}); return reject(new Error(`HTTP ${res.statusCode} for ${url}`)); }
-        const total = Number(res.headers['content-length']||0); let rec=0;
-        res.on('data', ch=>{ rec+=ch.length; if(total && onProgress) onProgress(Math.round(rec*100/total)); });
-        res.pipe(file); file.on('finish', ()=>file.close(()=>resolve(destPath)));
-      });
-      req.on('error', err=>{ file.close(); fs.unlink(destPath, ()=>{}); reject(err); });
-    };
-    doGet(fileUrl);
+    const file = fs.createWriteStream(destPath);
+    const req = https.get(url, { headers }, (res)=>{
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        // 302 to S3
+        file.close(); fs.unlink(destPath, ()=>{});
+        return httpDownload(res.headers.location, destPath, headers).then(resolve, reject);
+      }
+      if (res.statusCode !== 200){ file.close(); fs.unlink(destPath, ()=>{}); return reject(new Error(`HTTP ${res.statusCode} for ${url}`)); }
+      res.pipe(file); file.on('finish', ()=>file.close(()=>resolve(destPath)));
+    });
+    req.on('error', err=>{ file.close(); fs.unlink(destPath, ()=>{}); reject(err); });
   });
 }
 function sevenExtract(firstPartPath, outDir){
@@ -204,25 +194,31 @@ ipcMain.handle('model:download', async ()=>{
   const root = state.get('modelRoot');
   if (!root) throw new Error('請先選擇模型資料夾');
 
-  // 1) 優先嘗試 GitHub Release
-  const { repo, tag } = ghConfig();
-  let urls = await fetchModelAssets(repo, tag);
-
-  if (urls.length > 0) {
+  // 1) 優先：GitHub Release（支援私有）
+  const { repo, tag, token } = ghConfig();
+  const assets = await fetchReleaseAssets(repo, tag, token); // [{name, id, publicUrl, apiUrl}]
+  if (assets.length > 0){
     try{
       const tmp = path.join(root, '_dl_tmp'); fs.mkdirSync(tmp,{recursive:true});
-      log(`Found ${urls.length} parts on GitHub (${repo} @ ${tag}). Start download…`);
-      for (let i=0;i<urls.length;i++){
-        const url = urls[i];
-        const fname = path.basename(url);
-        const out = path.join(tmp, fname);
-        log(`Downloading ${fname}`);
-        await httpDownload(url, out, pct=>{
-          const base = (i/urls.length)*100;
-          progress(Math.min(99, Math.floor(base + pct/urls.length)));
-        });
+      log(`Found ${assets.length} parts on GitHub (${repo} @ ${tag}). Start download…`);
+
+      for (let i=0;i<assets.length;i++){
+        const a = assets[i];
+        // 私有 repo：必須用 asset API + Accept: application/octet-stream + Authorization
+        const useApi = !!token;
+        const url = useApi ? a.apiUrl : a.publicUrl;
+        const headers = { 'User-Agent':'evi-brush-desktop' };
+        if (useApi){ headers['Authorization'] = `Bearer ${token}`; headers['Accept'] = 'application/octet-stream'; }
+
+        const out = path.join(tmp, a.name);
+        log(`Downloading ${a.name}`);
+        await httpDownload(url, out, headers);
+
+        const pct = Math.round(((i+1)/assets.length)*99);
+        progress(pct);
       }
-      const first = path.join(tmp, path.basename(urls[0]));
+
+      const first = path.join(tmp, assets[0].name);
       log('Extracting with 7z…');
       await sevenExtract(first, root);
       progress(100); log('Download finished.');
@@ -230,13 +226,13 @@ ipcMain.handle('model:download', async ()=>{
       return true;
     }catch(err){
       log(`Online download failed: ${err.message}`, 'error');
-      // fall through to local picker
+      // 繼續走本機備援
     }
-  } else {
+  }else{
     log('No online model assets found (OK if private/offline).');
   }
 
-  // 2) 後備：本機分卷（選第一個 .001）
+  // 2) 備援：本機分卷（選第一個 .001）
   log('Fallback to local .7z.001 picker.');
   const r = await dialog.showOpenDialog({
     title: '選擇 model-pack.7z.001',
@@ -255,7 +251,7 @@ ipcMain.handle('designer:open', async ()=>{
   try{
     if (pyProc && !pyProc.killed){
       log('Python service already running.');
-    } else {
+    }else{
       const py = findPythonExe();
       const entry = findEntryScript();
       if (py && entry){
@@ -264,7 +260,7 @@ ipcMain.handle('designer:open', async ()=>{
         pyProc.stdout.on('data', d=>log(`[py] ${String(d).trim()}`));
         pyProc.stderr.on('data', d=>log(`[py-err] ${String(d).trim()}`, 'warn'));
         pyProc.on('close', c=>log(`[py] exit ${c}`));
-      } else {
+      }else{
         log('Python exe or entry not found — open URL directly.', 'warn');
       }
     }
