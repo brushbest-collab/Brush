@@ -1,21 +1,29 @@
-// main.js —— 覆蓋版（總是設定 preload）
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+// main.js —— 穩定版（請整檔覆蓋）
+const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
-let win;
+let win = null;
 
-// 極簡狀態存取，給 preload->renderer 用
-const _state = new Map();
-ipcMain.handle('state:get', (_e, key) => _state.get(key));
-ipcMain.handle('state:set', (_e, { key, val }) => { _state.set(key, val); return true; });
+// --- 簡易全域狀態（給 preload/renderer 讀寫） ---
+const state = new Map();
 
-ipcMain.handle('dialog:openDir', async () => {
-  const r = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
-  return r.canceled ? null : r.filePaths[0];
-});
+// 安全傳訊
+function send(channel, payload) {
+  if (win && !win.isDestroyed()) {
+    try { win.webContents.send(channel, payload); } catch (_) {}
+  }
+}
 
-function pickExisting(paths) { for (const p of paths) if (fs.existsSync(p)) return p; return null; }
+function log(msg, level = 'info') {
+  send('log', { level, msg, ts: Date.now() });
+}
+function progress(pct) { send('progress', pct); }
+
+function pickExisting(paths) {
+  for (const p of paths) { try { if (fs.existsSync(p)) return p; } catch(_) {} }
+  return null;
+}
 
 async function loadRenderer(w) {
   if (process.env.ELECTRON_START_URL) { await w.loadURL(process.env.ELECTRON_START_URL); return; }
@@ -40,33 +48,69 @@ async function loadRenderer(w) {
 }
 
 async function createWindow() {
-  // ✅ 不再做 exists 檢查：asar 環境下可能回傳 false
+  // ✅ 一律指定 preload（不要做 exists 檢查，asar 下可能判斷錯）
   const preloadPath = path.join(__dirname, 'preload.cjs');
-  console.log('[electron] preload path =', preloadPath);
 
   win = new BrowserWindow({
     width: 1200,
     height: 800,
+    show: true,
     webPreferences: {
-      preload: preloadPath,         // ← 一律設定
+      preload: preloadPath,
       nodeIntegration: false,
       contextIsolation: true,
       devTools: true,
     },
-    show: true,
   });
+
+  // 外部連結用預設瀏覽器開啟
+  win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
 
   win.webContents.on('did-fail-load', (_e, code, desc, url) => {
     dialog.showErrorBox('did-fail-load', `code=${code}\n${desc}\nurl=${url}`);
   });
 
-  win.webContents.openDevTools({ mode: 'detach' });
+  // 如需除錯可開啟
+  // win.webContents.openDevTools({ mode: 'detach' });
+
   await loadRenderer(win);
 
-  _state.set('appReady', true);
+  // 初始化預設狀態
+  if (!state.has('bootstrap')) state.set('bootstrap', false);
+  if (!state.has('modelRoot')) state.set('modelRoot', null);
 }
 
-process.on('uncaughtException', (err) => dialog.showErrorBox('Main Error', String(err?.stack || err)));
+// ---------- IPC：renderer 互動 ----------
+ipcMain.handle('state:get', (_e, key) => state.get(key));
+ipcMain.handle('state:set', (_e, { key, val }) => { state.set(key, val); return true; });
+
+ipcMain.handle('dialog:openDir', async () => {
+  const r = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
+  return r.canceled ? null : r.filePaths[0];
+});
+
+// 範例：下載流程（可自行換成真實邏輯）
+ipcMain.handle('model:download', async () => {
+  log('Start download…');
+  for (let i = 0; i <= 100; i += 5) {
+    progress(i);
+    await new Promise(r => setTimeout(r, 40));
+  }
+  log('Download finished.');
+  return true;
+});
+
+// 範例：開啟設計器
+ipcMain.handle('designer:open', async () => {
+  log('Open designer.');
+  return true;
+});
+
+// 全域錯誤兜底
+process.on('uncaughtException', (err) => {
+  dialog.showErrorBox('Main Error', String((err && err.stack) || err));
+});
+
 app.whenReady().then(createWindow);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('activate', () => { if
+app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
