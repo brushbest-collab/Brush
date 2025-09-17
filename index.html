@@ -4,12 +4,8 @@
   <meta charset="utf-8" />
   <title>EVI Brush Desktop</title>
 
-  <!-- 放寬 CSP，允許本頁 inline script/style -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self';
-                 img-src 'self' data:;
-                 style-src 'self' 'unsafe-inline';
-                 script-src 'self' 'unsafe-inline';">
+        content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline';">
 
   <style>
     body { font-family: system-ui, 'Segoe UI', 'Microsoft JhengHei', sans-serif; margin: 18px; }
@@ -26,16 +22,8 @@
 
   <!-- 安全降級：若 preload 沒載到，避免 UI 直接 throw -->
   <script>
-    window.store = window.store || {
-      getState: async () => null,
-      setState: async () => false
-    };
-    window.electron = window.electron || {
-      onLog: () => () => {},
-      onProgress: () => () => {},
-      openDir: async () => null,
-      invoke: async () => null
-    };
+    window.store = window.store || { getState: async () => null, setState: async () => false };
+    window.electron = window.electron || { onLog: () => () => {}, onProgress: () => () => {}, openDir: async () => null, invoke: async () => null };
   </script>
 </head>
 <body>
@@ -61,26 +49,19 @@
   (async function(){
     const $ = sel => document.querySelector(sel);
     const toStr = (m) => (typeof m === 'string') ? m : JSON.stringify(m);
-    const log = (m) => {
-      const el = $('#log');
-      el.textContent += (toStr(m) + '\n');
-      el.scrollTop = el.scrollHeight;
-    };
+    const log = (m) => { const el = $('#log'); el.textContent += (toStr(m) + '\n'); el.scrollTop = el.scrollHeight; };
 
-    // --- 初始化：從主程序取狀態 ---
+    // 初始化
     try {
       const modelRoot = await window.store.getState('modelRoot');
       const bootstrap  = await window.store.getState('bootstrap');
-
       $('#txtRoot').value = modelRoot || '--';
-      $('#bootstrap').textContent = bootstrap
-        ? 'Python bootstrap found.'
-        : 'Python bootstrap not found（請確認安裝包是否完整）';
+      $('#bootstrap').textContent = bootstrap ? 'Python bootstrap found.' : 'Python bootstrap not found（請確認安裝包是否完整）';
     } catch (err) {
       $('#bootstrap').textContent = '初始化失敗：' + (err?.message || err);
     }
 
-    // --- 事件：選擇模型資料夾 ---
+    // 選資料夾
     $('#btnPick').addEventListener('click', async () => {
       try {
         const p = await window.electron.openDir();
@@ -91,33 +72,29 @@
       } catch(e){}
     });
 
-    // --- 事件：下載模型（透過通用 IPC invoke）---
+    // 下載 / 解壓
     $('#btnDownload').addEventListener('click', async () => {
       try {
-        await window.electron.invoke('model:download');
-        log('[ui] 下載與解壓流程完成。');
+        const res = await window.electron.invoke('model:download');
+        if (res === true) {
+          log('[ui] 下載與解壓流程完成。');
+        } else if (res === 'cancelled') {
+          log('[ui] 已取消。若要用本機分卷，請把 model-pack.7z.001~N 置於同一資料夾，再選第1個 .001 檔。');
+        }
       } catch (err) {
         log(`[ui] 下載/解壓錯誤：${err?.message || err}`);
         alert('下載/解壓失敗：' + (err?.message || err));
       }
     });
 
-    // --- 事件：開啟設計 / 生成 ---
+    // 打開設計器
     $('#btnGo').addEventListener('click', async () => {
-      try {
-        await window.electron.invoke('designer:open');
-      } catch (err) {
-        log(`[ui] 打開設計器錯誤：${err?.message || err}`);
-      }
+      try { await window.electron.invoke('designer:open'); } catch (err) { log(`[ui] 打開設計器錯誤：${err?.message || err}`); }
     });
 
-    // --- 訂閱：主程序日志 & 進度 ---
+    // 日志 & 進度
     window.electron.onLog((payload) => log(payload));
-    if (typeof window.electron.onProgress === 'function') {
-      window.electron.onProgress((pct) => {
-        $('#bar').style.width = String(pct || 0) + '%';
-      });
-    }
+    window.electron.onProgress((pct) => { $('#bar').style.width = String(pct || 0) + '%'; });
   })();
   </script>
 </body>
