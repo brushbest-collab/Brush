@@ -9,9 +9,10 @@
     "start": "electron .",
     "start:dev": "set ELECTRON_START_URL=http://localhost:5173&& electron .",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder",
+    "dist": "electron-builder --publish never",
     "postinstall": "electron-builder install-app-deps"
   },
+  "dependencies": {},
   "devDependencies": {
     "electron": "^31.0.0",
     "electron-builder": "^24.13.3"
@@ -23,8 +24,6 @@
       "output": "dist"
     },
     "asar": true,
-
-    /* 需要的檔案（原本有的保留），前端輸出視你的實際為 dist 或 build */
     "files": [
       "main.js",
       "preload.cjs",
@@ -33,8 +32,6 @@
       "build/**",
       "!node_modules/.cache/**"
     ],
-
-    /* ✅ 把 python 整包放到 resources/python（asar 外） */
     "extraResources": [
       {
         "from": "python/",
@@ -42,15 +39,15 @@
         "filter": ["**/*"]
       }
     ],
-
-    /* 若你有把 python 放在 app 內也可保險性地解包 */
     "asarUnpack": [
       "python/**"
     ],
-
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
       ],
       "artifactName": "evi-brush-desktop-${version}-Setup.${ext}"
     },
