@@ -1,4 +1,3 @@
-// preload.cjs
 const { contextBridge, ipcRenderer } = require('electron');
 
 try { console.log('[preload] loaded'); } catch {}
