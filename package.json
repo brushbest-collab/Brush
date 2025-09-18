@@ -28,7 +28,7 @@
       "main.js",
       "preload.cjs",
       "index.html",
-      "app.config.json",
+      "app.config.json",     // ← 這行確保設定被帶入
       "dist/**",
       "build/**",
       "!node_modules/.cache/**"
