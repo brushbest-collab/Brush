@@ -47,17 +47,17 @@
 
     try {
       const modelRoot = await window.store.getState('modelRoot');
-      const bootstrap  = await window.store.getState('bootstrap');
+      const bootstrap = await window.store.getState('bootstrap');
       $('#txtRoot').value = modelRoot || '--';
       $('#bootstrap').textContent = bootstrap ? 'Python bootstrap found.' : 'Python bootstrap not found（請確認安裝包是否完整）';
-    } catch (err) { $('#bootstrap').textContent = '初始化失敗：' + (err?.message || err); }
+    } catch (err) { $('#bootstrap').textContent = '初始化失敗：' + (err && err.message ? err.message : err); }
 
     $('#btnPick').addEventListener('click', async () => {
       const p = await window.electron.openDir();
       if (!p) return;
       $('#txtRoot').value = p;
       await window.store.setState('modelRoot', p);
-      log(`[ui] 選擇模型資料夾：${p}`);
+      log('[ui] 選擇模型資料夾：' + p);
     });
 
     $('#btnDownload').addEventListener('click', async () => {
@@ -66,13 +66,15 @@
         if (res === true) log('[ui] 下載與解壓流程完成。');
         else if (res === 'cancelled') log('[ui] 已取消。若要用本機分卷，請把 model-pack.7z.001~N 置於同一資料夾，再選第 1 個 .001 檔。');
       } catch (err) {
-        log(`[ui] 下載/解壓錯誤：${err?.message || err}`);
-        alert('下載/解壓失敗：' + (err?.message || err));
+        const msg = (err && err.message) ? err.message : String(err);
+        log('[ui] 下載/解壓錯誤：' + msg);
+        alert('下載/解壓失敗：' + msg);
       }
     });
 
     $('#btnGo').addEventListener('click', async () => {
-      try { await window.electron.invoke('designer:open'); } catch (err) { log(`[ui] 打開設計器錯誤：${err?.message || err}`); }
+      try { await window.electron.invoke('designer:open'); }
+      catch (err) { log('[ui] 打開設計器錯誤：' + ((err && err.message) ? err.message : err)); }
     });
 
     window.electron.onLog((payload) => log(payload));
