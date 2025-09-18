@@ -67,7 +67,7 @@ function detectBootstrap(){
   return found;
 }
 
-/* ---------- 讀設定（支援 app.config.json / 環境變數） ---------- */
+/* ---------- 讀設定（app.config.json / 環境變數） ---------- */
 function readAppConfig() {
   const candidates = [
     path.join(process.resourcesPath, 'app.asar.unpacked', 'app.config.json'),
@@ -81,7 +81,7 @@ function readAppConfig() {
 }
 function ghConfig() {
   const cfg = readAppConfig() || {};
-  // 預設直接指向你的 repo/tag；可被環境變數覆蓋
+  // ✅ 內建你的預設值（可被環境變數覆蓋）
   const repoDefault = 'brushbest-collab/evi-brush-desktop';
   const tagDefault  = 'v105';
 
@@ -287,4 +287,4 @@ ipcMain.handle('designer:open', async ()=>{
 process.on('uncaughtException', err => dialog.showErrorBox('Main Error', String((err && err.stack) || err)));
 app.whenReady().then(createWindow);
 app.on('window-all-closed', ()=>{ if (process.platform !== 'darwin') app.quit(); });
-app.on('activate', ()=>{ if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+app.on('activate
