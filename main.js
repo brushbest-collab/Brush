@@ -81,8 +81,12 @@ function readAppConfig() {
 }
 function ghConfig() {
   const cfg = readAppConfig() || {};
-  const repo  = process.env.GH_REPO || cfg.gh_repo || '';
-  let   tag   = process.env.GH_TAG  || cfg.gh_tag  || '';
+  // 預設直接指向你的 repo/tag；可被環境變數覆蓋
+  const repoDefault = 'brushbest-collab/evi-brush-desktop';
+  const tagDefault  = 'v105';
+
+  const repo  = process.env.GH_REPO || cfg.gh_repo || repoDefault;
+  let   tag   = process.env.GH_TAG  || cfg.gh_tag  || tagDefault;
   if (!tag) { try { tag = 'v' + app.getVersion(); } catch {} }
   const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || cfg.gh_token || '';
   log(`[gh] repo=${repo||'-'} tag=${tag||'-'} token=${token ? 'yes' : 'no'}`);
@@ -243,7 +247,7 @@ ipcMain.handle('model:download', async ()=>{
     properties: ['openFile'],
     filters: [{ name: '7z split first part', extensions: ['001'] }]
   });
-  if (r.canceled || !r.filePaths[0]) { log('User cancelled picker.'); return 'cancelled'; }
+  if (r.canceled || !r.filePaths[0]) { log('User cancelled picker. 若要用本機分卷，請把 model-pack.7z.001~N 置於同一資料夾，再選第 1 個 .001 檔。'); return 'cancelled'; }
   const firstPartPath = r.filePaths[0];
   log(`Extract from local: ${firstPartPath}`);
   await sevenExtract(firstPartPath, root);
