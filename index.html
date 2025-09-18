@@ -47,10 +47,10 @@
 
     try {
       const modelRoot = await window.store.getState('modelRoot');
-      const bootstrap = await window.store.getState('bootstrap');
+      const bootstrap  = await window.store.getState('bootstrap');
       $('#txtRoot').value = modelRoot || '--';
       $('#bootstrap').textContent = bootstrap ? 'Python bootstrap found.' : 'Python bootstrap not found（請確認安裝包是否完整）';
-    } catch (err) { $('#bootstrap').textContent = '初始化失敗：' + (err && err.message ? err.message : err); }
+    } catch (err) { $('#bootstrap').textContent = '初始化失敗：' + (err?.message || err); }
 
     $('#btnPick').addEventListener('click', async () => {
       const p = await window.electron.openDir();
@@ -73,8 +73,7 @@
     });
 
     $('#btnGo').addEventListener('click', async () => {
-      try { await window.electron.invoke('designer:open'); }
-      catch (err) { log('[ui] 打開設計器錯誤：' + ((err && err.message) ? err.message : err)); }
+      try { await window.electron.invoke('designer:open'); } catch (err) { log('[ui] 打開設計器錯誤：' + ((err && err.message) ? err.message : err)); }
     });
 
     window.electron.onLog((payload) => log(payload));
