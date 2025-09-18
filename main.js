@@ -1,4 +1,4 @@
-// main.js —— GitHub Release 自動下載（支援私有）+ 本機分卷備援 + Python 服務啟動
+// main.js — GitHub Release 自動下載（支援私有）+ 本機分卷備援 + Python 啟動
 const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -11,13 +11,13 @@ let win = null;
 
 /* ---------- 共用 ---------- */
 const state = new Map();
-function send(ch, payload){ if (win && !win.isDestroyed()) try{ win.webContents.send(ch, payload); }catch{} }
-function log(msg, level='info'){ send('log', { level, msg, ts: Date.now() }); }
-function progress(p){ send('progress', Math.max(0, Math.min(100, Number(p)||0))); }
-function pickExisting(paths){ for (const p of paths){ try{ if (p && fs.existsSync(p)) return p; }catch{} } return null; }
+function send(ch, payload) { if (win && !win.isDestroyed()) { try { win.webContents.send(ch, payload); } catch {} } }
+function log(msg, level = 'info') { send('log', { level, msg, ts: Date.now() }); }
+function progress(p) { send('progress', Math.max(0, Math.min(100, Number(p) || 0))); }
+function pickExisting(paths) { for (const p of paths) { try { if (p && fs.existsSync(p)) return p; } catch {} } return null; }
 
 /* ---------- UI 載入 ---------- */
-function resolveHtml(){
+function resolveHtml() {
   const c = [
     path.join(__dirname, 'index.html'),
     path.join(__dirname, 'build', 'index.html'),
@@ -31,26 +31,33 @@ function resolveHtml(){
   ];
   return pickExisting(c);
 }
-async function loadRenderer(w){
-  if (process.env.ELECTRON_START_URL){ await w.loadURL(process.env.ELECTRON_START_URL); return; }
+async function loadRenderer(w) {
+  if (process.env.ELECTRON_START_URL) { await w.loadURL(process.env.ELECTRON_START_URL); return; }
   const html = resolveHtml();
-  if (!html){ dialog.showErrorBox('Renderer 未找到','沒有找到 index.html'); return; }
+  if (!html) { dialog.showErrorBox('Renderer 未找到', '沒有找到 index.html'); return; }
   await w.loadFile(html);
 }
-async function createWindow(){
+async function createWindow() {
   win = new BrowserWindow({
-    width: 1200, height: 800, show: true,
-    webPreferences: { preload: path.join(__dirname,'preload.cjs'), nodeIntegration:false, contextIsolation:true, devTools:true }
+    width: 1200,
+    height: 800,
+    show: true,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      nodeIntegration: false,
+      contextIsolation: true,
+      devTools: true
+    }
   });
-  win.webContents.setWindowOpenHandler(({url})=>{ shell.openExternal(url); return {action:'deny'}; });
-  win.webContents.on('did-fail-load',(_e,code,desc,url)=>dialog.showErrorBox('did-fail-load',`code=${code}\n${desc}\nurl=${url}`));
+  win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' }; });
+  win.webContents.on('did-fail-load', (_e, code, desc, url) => dialog.showErrorBox('did-fail-load', `code=${code}\n${desc}\nurl=${url}`));
   await loadRenderer(win);
   if (!state.has('modelRoot')) state.set('modelRoot', null);
   detectBootstrap();
 }
 
 /* ---------- Python bootstrap 偵測 ---------- */
-function findBootstrapMarker(){
+function findBootstrapMarker() {
   const c = [
     path.join(__dirname, 'python', 'pbs', 'ok'),
     path.join(process.resourcesPath, 'python', 'pbs', 'ok'),
@@ -59,7 +66,7 @@ function findBootstrapMarker(){
   ];
   return pickExisting(c);
 }
-function detectBootstrap(){
+function detectBootstrap() {
   const marker = findBootstrapMarker();
   const found = !!marker;
   state.set('bootstrap', found);
@@ -81,15 +88,13 @@ function readAppConfig() {
 }
 function ghConfig() {
   const cfg = readAppConfig() || {};
-  // ✅ 內建你的預設值（可被環境變數覆蓋）
   const repoDefault = 'brushbest-collab/evi-brush-desktop';
-  const tagDefault  = 'v105';
-
-  const repo  = process.env.GH_REPO || cfg.gh_repo || repoDefault;
-  let   tag   = process.env.GH_TAG  || cfg.gh_tag  || tagDefault;
+  const tagDefault = 'v105';
+  const repo = process.env.GH_REPO || cfg.gh_repo || repoDefault;
+  let tag = process.env.GH_TAG || cfg.gh_tag || tagDefault;
   if (!tag) { try { tag = 'v' + app.getVersion(); } catch {} }
   const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || cfg.gh_token || '';
-  log(`[gh] repo=${repo||'-'} tag=${tag||'-'} token=${token ? 'yes' : 'no'}`);
+  log(`[gh] repo=${repo || '-'} tag=${tag || '-'} token=${token ? 'yes' : 'no'}`);
   return { repo, tag, token };
 }
 
@@ -98,7 +103,7 @@ function fetchReleaseAssets(repo, tag, token) {
   return new Promise((resolve) => {
     if (!repo || !tag) return resolve([]);
     const api = `https://api.github.com/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`;
-    const headers = { 'User-Agent':'evi-brush-desktop', 'Accept':'application/vnd.github+json' };
+    const headers = { 'User-Agent': 'evi-brush-desktop', 'Accept': 'application/vnd.github+json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
     const req = https.get(api, { headers, timeout: 15000 }, (res) => {
@@ -107,16 +112,17 @@ function fetchReleaseAssets(repo, tag, token) {
         return fetchReleaseAssetsFromUrl(res.headers.location, token).then(resolve);
       }
       if (res.statusCode !== 200) { res.resume(); return resolve([]); }
-      let buf=''; res.setEncoding('utf8');
-      res.on('data', c => buf+=c);
+      let buf = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => buf += c);
       res.on('end', () => {
         try {
           const json = JSON.parse(buf);
           const assets = Array.isArray(json.assets) ? json.assets : [];
           const list = assets
             .filter(a => /model-pack\.7z\.\d{3}$/i.test(a.name))
-            .sort((a,b) => Number(a.name.match(/(\d{3})$/)[1]) - Number(b.name.match(/(\d{3})$/)[1]))
-            .map(a => ({ name:a.name, id:a.id, publicUrl:a.browser_download_url, apiUrl:a.url }));
+            .sort((a, b) => Number(a.name.match(/(\d{3})$/)[1]) - Number(b.name.match(/(\d{3})$/)[1]))
+            .map(a => ({ name: a.name, id: a.id, publicUrl: a.browser_download_url, apiUrl: a.url }));
           resolve(list);
         } catch { resolve([]); }
       });
@@ -125,122 +131,121 @@ function fetchReleaseAssets(repo, tag, token) {
     req.on('timeout', () => { req.destroy(); resolve([]); });
   });
 }
-function fetchReleaseAssetsFromUrl(url, token){
-  return new Promise((resolve)=>{
-    const headers = { 'User-Agent':'evi-brush-desktop', 'Accept':'application/vnd.github+json' };
+function fetchReleaseAssetsFromUrl(url, token) {
+  return new Promise((resolve) => {
+    const headers = { 'User-Agent': 'evi-brush-desktop', 'Accept': 'application/vnd.github+json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    const req = https.get(url, { headers, timeout:15000 }, (res)=>{
-      if (res.statusCode !== 200){ res.resume(); return resolve([]); }
-      let buf=''; res.setEncoding('utf8');
-      res.on('data', c=> buf+=c);
-      res.on('end', ()=>{
-        try{
+    const req = https.get(url, { headers, timeout: 15000 }, (res) => {
+      if (res.statusCode !== 200) { res.resume(); return resolve([]); }
+      let buf = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => buf += c);
+      res.on('end', () => {
+        try {
           const json = JSON.parse(buf);
           const assets = Array.isArray(json.assets) ? json.assets : [];
           const list = assets
             .filter(a => /model-pack\.7z\.\d{3}$/i.test(a.name))
-            .sort((a,b) => Number(a.name.match(/(\d{3})$/)[1]) - Number(b.name.match(/(\d{3})$/)[1]))
-            .map(a => ({ name:a.name, id:a.id, publicUrl:a.browser_download_url, apiUrl:a.url }));
+            .sort((a, b) => Number(a.name.match(/(\d{3})$/)[1]) - Number(b.name.match(/(\d{3})$/)[1]))
+            .map(a => ({ name: a.name, id: a.id, publicUrl: a.browser_download_url, apiUrl: a.url }));
           resolve(list);
-        }catch{ resolve([]); }
+        } catch { resolve([]); }
       });
     });
-    req.on('error', ()=>resolve([]));
-    req.on('timeout', ()=>{ req.destroy(); resolve([]); });
+    req.on('error', () => resolve([]));
+    req.on('timeout', () => { req.destroy(); resolve([]); });
   });
 }
 
 /* ---------- 下載/解壓 ---------- */
-function httpDownload(url, destPath, headers){
-  return new Promise((resolve, reject)=>{
+function httpDownload(url, destPath, headers) {
+  return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(destPath);
-    const req = https.get(url, { headers }, (res)=>{
+    const req = https.get(url, { headers }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        file.close(); fs.unlink(destPath, ()=>{});
+        file.close(); fs.unlink(destPath, () => {});
         return httpDownload(res.headers.location, destPath, headers).then(resolve, reject);
       }
-      if (res.statusCode !== 200){ file.close(); fs.unlink(destPath, ()=>{}); return reject(new Error(`HTTP ${res.statusCode} for ${url}`)); }
-      res.pipe(file); file.on('finish', ()=>file.close(()=>resolve(destPath)));
+      if (res.statusCode !== 200) { file.close(); fs.unlink(destPath, () => {}); return reject(new Error(`HTTP ${res.statusCode} for ${url}`)); }
+      res.pipe(file);
+      file.on('finish', () => file.close(() => resolve(destPath)));
     });
-    req.on('error', err=>{ file.close(); fs.unlink(destPath, ()=>{}); reject(err); });
+    req.on('error', (err) => { file.close(); fs.unlink(destPath, () => {}); reject(err); });
   });
 }
-function sevenExtract(firstPartPath, outDir){
-  return new Promise((resolve,reject)=>{
+function sevenExtract(firstPartPath, outDir) {
+  return new Promise((resolve, reject) => {
     const proc = spawn(sevenPath, ['x', firstPartPath, `-o${outDir}`, '-y']);
-    proc.stdout.on('data', d=>log(String(d)));
-    proc.stderr.on('data', d=>log(String(d),'warn'));
-    proc.on('close', code => code===0 ? resolve(true) : reject(new Error(`7z exit ${code}`)));
+    proc.stdout.on('data', (d) => log(String(d)));
+    proc.stderr.on('data', (d) => log(String(d), 'warn'));
+    proc.on('close', (code) => code === 0 ? resolve(true) : reject(new Error(`7z exit ${code}`)));
   });
 }
 
 /* ---------- Python 啟動 ---------- */
-function findPythonExe(){
+function findPythonExe() {
   const c = [
     process.env.EVI_PYTHON_EXE && path.normalize(process.env.EVI_PYTHON_EXE),
-    path.join(process.resourcesPath,'python','python.exe'),
-    path.join(process.resourcesPath,'app.asar.unpacked','python','python.exe'),
-    path.join(__dirname,'python','python.exe')
+    path.join(process.resourcesPath, 'python', 'python.exe'),
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'python', 'python.exe'),
+    path.join(__dirname, 'python', 'python.exe')
   ].filter(Boolean);
   return pickExisting(c);
 }
-function findEntryScript(){
+function findEntryScript() {
   const c = [
     process.env.EVI_PY_ENTRY && path.normalize(process.env.EVI_PY_ENTRY),
-    path.join(process.resourcesPath,'python','pbs','serve.py'),
-    path.join(process.resourcesPath,'app.asar.unpacked','python','pbs','serve.py'),
-    path.join(__dirname,'python','pbs','serve.py')
+    path.join(process.resourcesPath, 'python', 'pbs', 'serve.py'),
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'python', 'pbs', 'serve.py'),
+    path.join(__dirname, 'python', 'pbs', 'serve.py')
   ].filter(Boolean);
   return pickExisting(c);
 }
 let pyProc = null;
 
 /* ---------- IPC ---------- */
-ipcMain.handle('state:get', (_e,key)=>state.get(key));
-ipcMain.handle('state:set', (_e,{key,val})=>{ state.set(key,val); return true; });
+ipcMain.handle('state:get', (_e, key) => state.get(key));
+ipcMain.handle('state:set', (_e, { key, val }) => { state.set(key, val); return true; });
 
-ipcMain.handle('dialog:openDir', async ()=>{
-  const r = await dialog.showOpenDialog({ properties:['openDirectory','createDirectory'] });
+ipcMain.handle('dialog:openDir', async () => {
+  const r = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
   return r.canceled ? null : r.filePaths[0];
 });
 
-ipcMain.handle('model:download', async ()=>{
+ipcMain.handle('model:download', async () => {
   const root = state.get('modelRoot');
   if (!root) throw new Error('請先選擇模型資料夾');
 
-  // 1) 先試 GitHub（公開或私有）
   const { repo, tag, token } = ghConfig();
   const assets = await fetchReleaseAssets(repo, tag, token);
-  if (assets.length > 0){
-    try{
-      const tmp = path.join(root, '_dl_tmp'); fs.mkdirSync(tmp,{recursive:true});
+  if (assets.length > 0) {
+    try {
+      const tmp = path.join(root, '_dl_tmp'); fs.mkdirSync(tmp, { recursive: true });
       log(`Found ${assets.length} parts on GitHub (${repo} @ ${tag}). Start download…`);
-      for (let i=0;i<assets.length;i++){
+      for (let i = 0; i < assets.length; i++) {
         const a = assets[i];
-        const useApi = !!token; // 私有 repo 要走 asset API
+        const useApi = !!token;
         const url = useApi ? a.apiUrl : a.publicUrl;
-        const headers = { 'User-Agent':'evi-brush-desktop' };
-        if (useApi){ headers['Authorization'] = `Bearer ${token}`; headers['Accept'] = 'application/octet-stream'; }
+        const headers = { 'User-Agent': 'evi-brush-desktop' };
+        if (useApi) { headers['Authorization'] = `Bearer ${token}`; headers['Accept'] = 'application/octet-stream'; }
         const out = path.join(tmp, a.name);
         log(`Downloading ${a.name}`);
         await httpDownload(url, out, headers);
-        progress(Math.round(((i+1)/assets.length)*99));
+        progress(Math.round(((i + 1) / assets.length) * 99));
       }
       const first = path.join(tmp, assets[0].name);
       log('Extracting with 7z…');
       await sevenExtract(first, root);
       progress(100); log('Download finished.');
-      try{ fs.rmSync(tmp,{recursive:true,force:true}); }catch{}
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
       return true;
-    }catch(err){
+    } catch (err) {
       log(`Online download failed: ${err.message}`, 'error');
-      // 繼續走本機備援
     }
   } else {
     log('No online model assets found (OK if private/offline).');
   }
 
-  // 2) 備援：本機分卷（選第一個 .001）
   log('Fallback to local .7z.001 picker.');
   const r = await dialog.showOpenDialog({
     title: '選擇 model-pack.7z.001',
@@ -255,20 +260,20 @@ ipcMain.handle('model:download', async ()=>{
   return true;
 });
 
-ipcMain.handle('designer:open', async ()=>{
-  try{
-    if (pyProc && !pyProc.killed){
+ipcMain.handle('designer:open', async () => {
+  try {
+    if (pyProc && !pyProc.killed) {
       log('Python service already running.');
-    }else{
+    } else {
       const py = findPythonExe();
       const entry = findEntryScript();
-      if (py && entry){
+      if (py && entry) {
         log(`Start python: ${py} ${entry}`);
         pyProc = spawn(py, [entry], { cwd: path.dirname(entry) });
-        pyProc.stdout.on('data', d=>log(`[py] ${String(d).trim()}`));
-        pyProc.stderr.on('data', d=>log(`[py-err] ${String(d).trim()}`, 'warn'));
-        pyProc.on('close', c=>log(`[py] exit ${c}`));
-      }else{
+        pyProc.stdout.on('data', (d) => log(`[py] ${String(d).trim()}`));
+        pyProc.stderr.on('data', (d) => log(`[py-err] ${String(d).trim()}`, 'warn'));
+        pyProc.on('close', (c) => log(`[py] exit ${c}`));
+      } else {
         log('Python exe or entry not found — open URL directly.', 'warn');
       }
     }
@@ -277,14 +282,14 @@ ipcMain.handle('designer:open', async ()=>{
     await child.loadURL(url);
     log('Open designer.');
     return true;
-  }catch(err){
+  } catch (err) {
     log(`Open designer error: ${err.message}`, 'error');
     throw err;
   }
 });
 
 /* ---------- 啟動 ---------- */
-process.on('uncaughtException', err => dialog.showErrorBox('Main Error', String((err && err.stack) || err)));
+process.on('uncaughtException', (err) => dialog.showErrorBox('Main Error', String((err && err.stack) || err)));
 app.whenReady().then(createWindow);
-app.on('window-all-closed', ()=>{ if (process.platform !== 'darwin') app.quit(); });
-app.on('activate
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
