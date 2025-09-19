@@ -1,4 +1,4 @@
-// main.js — GitHub Release 自動下載（私有/公開皆可）+ 401 自動降級 + 直接路徑探測 + 本機分卷備援
+// main.js — GitHub 下載（私有/公開）+ 401 降級 + 直接路徑探測 + 本機備援 + UI 可設定 GH 參數與 Token
 const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -68,17 +68,27 @@ function detectBootstrap(){
   return found;
 }
 
-/* ---------- 設定（app.config.json / env） ---------- */
+/* ---------- 設定（app.config.json / 使用者設定 / env） ---------- */
+function userCfgPath(){ return path.join(app.getPath('userData'), 'app.config.json'); }
+function readJsonSafe(p){
+  try { return JSON.parse(fs.readFileSync(p,'utf8')); } catch { return null; }
+}
+function writeJsonSafe(p, obj){
+  try { fs.mkdirSync(path.dirname(p), { recursive:true }); fs.writeFileSync(p, JSON.stringify(obj, null, 2), 'utf8'); return true; }
+  catch { return false; }
+}
 function readAppConfig(){
+  // 使用者優先，其次打包內建
+  const u = readJsonSafe(userCfgPath());
+  if (u) return u;
   const candidates = [
     path.join(process.resourcesPath, 'app.asar.unpacked', 'app.config.json'),
     path.join(process.resourcesPath, 'app', 'app.config.json'),
     path.join(process.resourcesPath, 'app.asar', 'app.config.json'),
     path.join(__dirname, 'app.config.json')
   ];
-  const p = pickExisting(candidates);
-  if (!p) return null;
-  try { return JSON.parse(fs.readFileSync(p,'utf8')); } catch { return null; }
+  for (const p of candidates){ const j = readJsonSafe(p); if (j) return j; }
+  return {};
 }
 function ghConfig(){
   const cfg = readAppConfig() || {};
@@ -149,10 +159,9 @@ async function fetchReleaseAssetsViaApi(repo, tag, tokenOrEmpty){
   return [];
 }
 
-/* ---------- 不走 API，直接路徑探測 ---------- */
+/* ---------- 不走 API，直接路徑探測（公開 repo 才有效） ---------- */
 async function urlExistsHEAD(url){
   const r = await httpRequest(url, { 'User-Agent':'evi-brush-desktop' }, { method:'HEAD', timeout:10000 });
-  // GitHub 會 302 轉到 objects.githubusercontent.com，2xx/3xx 都視為存在
   return r.status >= 200 && r.status < 400;
 }
 async function probeDirectAssets(repo, tag, prefix='model-pack.7z.', maxParts=120){
@@ -164,24 +173,24 @@ async function probeDirectAssets(repo, tag, prefix='model-pack.7z.', maxParts=12
     try{
       if (await urlExistsHEAD(url)){
         list.push({ name, id:i, publicUrl:url, apiUrl:null });
-      }else if (list.length){ break; } // 已找到開頭，遇到第一個不存在就停
+      }else if (list.length){ break; }
     }catch{}
   }
   if (list.length) log(`[gh] Found ${list.length} parts via direct download probing.`);
   return list;
 }
 
-/* ---------- 取得資產（整合邏輯） ---------- */
+/* ---------- 取得資產（整合） ---------- */
 async function fetchReleaseAssets(repo, tag, token){
-  // 1) 先帶 token
+  // 帶 token（私有需要）
   const a1 = await fetchReleaseAssetsViaApi(repo, tag, token || '');
   if (a1.length) return a1;
 
-  // 2) 如果剛才是帶 token 且 API 回 401，或單純沒找到，改用「不帶 token」再試（公開專案）
+  // 不帶 token（公開可用）
   const a2 = await fetchReleaseAssetsViaApi(repo, tag, '');
   if (a2.length) return a2;
 
-  // 3) 直接路徑探測（不靠 API）
+  // 直接路徑探測（公開可用）
   const a3 = await probeDirectAssets(repo, tag);
   return a3;
 }
@@ -231,9 +240,27 @@ function findEntryScript(){
 }
 let pyProc = null;
 
-/* ---------- IPC ---------- */
+/* ---------- IPC：狀態 / 設定 / 下載 / 開啟 ---------- */
 ipcMain.handle('state:get', (_e,key)=>state.get(key));
 ipcMain.handle('state:set', (_e,{key,val})=>{ state.set(key,val); return true; });
+
+ipcMain.handle('cfg:get', async ()=>{
+  const cfg = readAppConfig() || {};
+  return {
+    repo:  cfg.gh_repo || '',
+    tag:   cfg.gh_tag  || '',
+    token: cfg.gh_token || ''
+  };
+});
+ipcMain.handle('cfg:set', async (_e, { repo, tag, token })=>{
+  const merged = { ...(readAppConfig()||{}) };
+  if (repo !== undefined)  merged.gh_repo  = String(repo||'').trim();
+  if (tag  !== undefined)  merged.gh_tag   = String(tag||'').trim();
+  if (token!== undefined)  merged.gh_token = String(token||'').trim();
+  const ok = writeJsonSafe(userCfgPath(), merged);
+  log(ok ? '[cfg] saved to userData' : '[cfg] save failed', ok ? 'info' : 'error');
+  return ok;
+});
 
 ipcMain.handle('dialog:openDir', async ()=>{
   const r = await dialog.showOpenDialog({ properties:['openDirectory','createDirectory'] });
@@ -252,7 +279,6 @@ ipcMain.handle('model:download', async ()=>{
       log(`Found ${assets.length} parts on GitHub (${repo} @ ${tag}). Start download…`);
       for (let i=0;i<assets.length;i++){
         const a = assets[i];
-        // 私有（用 API）需要 Accept: application/octet-stream；公開走 publicUrl
         const useApi = !!(token && a.apiUrl);
         const url = useApi ? a.apiUrl : a.publicUrl;
         const headers = { 'User-Agent':'evi-brush-desktop' };
