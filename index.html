@@ -12,10 +12,14 @@
     .row { display: flex; gap: 12px; align-items: center; margin: 8px 0; }
     button { padding: 10px 16px; border-radius: 8px; border: 1px solid #bbb; background: #eef3ff; cursor: pointer; }
     button.primary { background: #3b82f6; color: white; border-color: #3b82f6; }
-    input.path { width: 340px; padding: 10px; border-radius: 8px; border: 1px solid #ccd; background: #f7f9ff; }
+    input.path, input.text { padding: 10px; border-radius: 8px; border: 1px solid #ccd; background: #f7f9ff; }
+    input.path { width: 340px; }
+    input.text { width: 320px; }
     .bar { height: 8px; background: #cfe3ff; border-radius: 6px; overflow: hidden; margin: 10px 0 14px; }
     .bar > .fill { height: 100%; width: 0%; background: linear-gradient(90deg,#3b82f6,#60a5fa); transition: width .15s; }
     pre.log { background:#0f1217; color:#d3ffd3; padding:10px; border-radius:8px; height: 360px; overflow:auto; white-space:pre-wrap; }
+    details { margin: 8px 0 14px; }
+    details > summary { cursor: pointer; user-select: none; }
   </style>
   <script>
     window.store = window.store || { getState: async () => null, setState: async () => false };
@@ -30,6 +34,22 @@
     <button id="btnPick">選擇模型資料夾</button>
     <input id="txtRoot" class="path" value="--" readonly />
   </div>
+
+  <details>
+    <summary>設定（GitHub repo / tag / token）</summary>
+    <div class="row">
+      <label style="width:80px;">Repo</label>
+      <input id="cfgRepo" class="text" placeholder="owner/repo" />
+      <label style="width:60px;">Tag</label>
+      <input id="cfgTag" class="text" placeholder="v105" />
+    </div>
+    <div class="row">
+      <label style="width:80px;">Token</label>
+      <input id="cfgToken" class="text" placeholder="ghp_***（私有必填）" />
+      <button id="btnSaveCfg">儲存設定</button>
+      <small id="cfgStatus" style="color:#555;"></small>
+    </div>
+  </details>
 
   <div class="bar"><div class="fill" id="bar"></div></div>
 
@@ -50,7 +70,21 @@
       const bootstrap  = await window.store.getState('bootstrap');
       $('#txtRoot').value = modelRoot || '--';
       $('#bootstrap').textContent = bootstrap ? 'Python bootstrap found.' : 'Python bootstrap not found（請確認安裝包是否完整）';
+
+      const cfg = await window.electron.invoke('cfg:get');
+      $('#cfgRepo').value  = cfg.repo  || '';
+      $('#cfgTag').value   = cfg.tag   || '';
+      $('#cfgToken').value = cfg.token || '';
     } catch (err) { $('#bootstrap').textContent = '初始化失敗：' + (err?.message || err); }
+
+    $('#btnSaveCfg').addEventListener('click', async () => {
+      const repo  = $('#cfgRepo').value.trim();
+      const tag   = $('#cfgTag').value.trim();
+      const token = $('#cfgToken').value.trim();
+      const ok = await window.electron.invoke('cfg:set', { repo, tag, token });
+      $('#cfgStatus').textContent = ok ? '已儲存（下次下載即生效）' : '儲存失敗';
+      log(ok ? '[cfg] saved.' : '[cfg] save failed.');
+    });
 
     $('#btnPick').addEventListener('click', async () => {
       const p = await window.electron.openDir();
