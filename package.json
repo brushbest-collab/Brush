@@ -36,7 +36,9 @@
     "extraResources": [
       { "from": "python/", "to": "python", "filter": ["**/*"] }
     ],
-    "asarUnpack": ["python/**"],
+    "asarUnpack": [
+      "python/**"
+    ],
     "win": {
       "target": [{ "target": "nsis", "arch": ["x64"] }],
       "artifactName": "evi-brush-desktop-${version}-Setup.${ext}"
